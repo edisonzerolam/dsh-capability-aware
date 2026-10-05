@@ -1,0 +1,26 @@
+# dsh-capability-aware bundle 层 —— 自我能力感知插件。
+#
+# build: 2026-10-05-v4-rpc-watch（本地适配标记。改 lib/*.js 后**同时**动这一行，
+#        才能触发 DSH 的 patchReload: live 重载插件；实测只改 lib 不会重载）
+#
+# 注意（YAML 陷阱，harness-ops §E 实证）：
+#  - 键名不加引号会被 YAML 1.1 误解析（如 "off"），本文件所有字符串值均安全（无 360/off 类）。
+#
+# config 键（apply() 读取）：
+#  scanOnBoot: 启动后自动全量扫描一次并落盘（默认 true）
+#  scanDelayMs: 启动扫描延迟毫秒（避让宿主启动高峰，默认 3000）
+#  watch: v4 反应式更新总开关——监听能力根目录，装/删/改技能·插件·记忆·连接器·自动化时自动重扫（默认 true）
+#  debounceMs: 文件事件防抖毫秒（密集变更合并成一次扫描，默认 5000）
+#  minIntervalMs: 两次扫描最小间隔（防抖风暴下限，默认 30000）
+#  periodicMs: 周期兜底全量扫描间隔毫秒（覆盖 fs.watch 漏事件 + 硬件/软件环境变化，默认 1200000 = 20min；0=关闭）
+#  tools: CLI 探针白名单（缺省 ['python','node','git','rg','dsh']）
+- insert:
+    - id: dsh-capability-aware
+      name: dsh-capability-aware
+      config:
+        scanOnBoot: true
+        scanDelayMs: 3000
+        watch: true
+        debounceMs: 5000
+        minIntervalMs: 30000
+        periodicMs: 1200000

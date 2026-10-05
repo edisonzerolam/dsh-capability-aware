@@ -1,0 +1,38 @@
+{
+  "name": "dsh-capability-aware",
+  "version": "0.4.0",
+  "description": "DSH 自我能力感知插件：自动扫描维护能力清单（插件/技能/记忆/连接器/自动化/硬件/软件），快速检索匹配能力及调用方式，缺失时给出补足引导；支持变更即更新与定时巡检。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cap.mjs",
+    "docs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "capability",
+    "registry",
+    "self-aware"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
