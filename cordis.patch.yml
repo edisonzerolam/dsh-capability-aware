@@ -1,6 +1,6 @@
 # dsh-capability-aware bundle 层 —— 自我能力感知插件。
 #
-# build: 2026-10-05-v4-rpc-watch（本地适配标记。改 lib/*.js 后**同时**动这一行，
+# build: 2026-10-06-v4.5-agents-pointer（本地适配标记。改 lib/*.js 后**同时**动这一行，
 #        才能触发 DSH 的 patchReload: live 重载插件；实测只改 lib 不会重载）
 #
 # 注意（YAML 陷阱，harness-ops §E 实证）：
@@ -14,6 +14,12 @@
 #  minIntervalMs: 两次扫描最小间隔（防抖风暴下限，默认 30000）
 #  periodicMs: 周期兜底全量扫描间隔毫秒（覆盖 fs.watch 漏事件 + 硬件/软件环境变化，默认 1200000 = 20min；0=关闭）
 #  tools: CLI 探针白名单（缺省 ['python','node','git','rg','dsh']）
+#  provisionSkill: v4.5 自供给技能入口 capability-lookup（默认 true；装上即得，幂等带版本戳）
+#  provisionAgentsPointer: v4.5 向 ~/.dsh/AGENTS.md 注入带标记的管理块（环境依赖类任务先跑
+#      cap.mjs brief）——**改用户规则文件，默认 false**（公共仓库不得替安装者默认改文件）；
+#      需要的本机可在宿主 profile 侧覆盖为 true。开启后幂等维护、插件升级自动刷新。
+#      开启理由（本机裁决 2026-10-06）：一天实测 harness 0 次主动调用，环境类任务缺一个
+#      必经触发点；本块即该触发点。
 - insert:
     - id: dsh-capability-aware
       name: dsh-capability-aware
@@ -24,3 +30,5 @@
         debounceMs: 5000
         minIntervalMs: 30000
         periodicMs: 1200000
+        provisionSkill: true
+        provisionAgentsPointer: false

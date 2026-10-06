@@ -6,6 +6,15 @@
 
 [中文说明见 README.md](./README.md) · Part of the DSH plugin ecosystem.
 
+### Self-provisioning (install-and-get)
+
+- **Skill entry** (on by default): on first boot after install, the plugin writes the `capability-lookup`
+  skill into `~/.dsh/skills/` (idempotent, version-stamped) — the harness skill catalog picks it up
+  automatically, zero manual configuration.
+- **AGENTS.md pointer** (off by default — it edits a user file, so it requires an explicit
+  `provisionAgentsPointer: true`): injects a marker-managed block telling the agent to run
+  `cap.mjs brief` for environment-dependent tasks. Idempotent, auto-refreshed on plugin upgrade.
+
 ## Why
 
 An agent that doesn't know its own machine wastes turns guessing: *is ffmpeg installed? what GPU is this?

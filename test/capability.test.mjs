@@ -318,6 +318,16 @@ test('software: parseInstalledSoftware 解析 TSV 行并过滤系统更新噪声
   assert.equal(rows.find((r) => r.name === '7-Zip 24.08').version, '24.08');
 });
 
+// ── T11b (v4.5.1) cp936 修复回归：CJK 2 字软件名不被误滤 + 乱码行如实保留 ──
+test('software: parseInstalledSoftware 保留 CJK 2 字软件名、拉丁 2 字名仍过滤（cp936 修复回归）', () => {
+  const rows = parseInstalledSoftware('微信\t6.9\n迅雷\t5.1.30\nAB\t1.0\nWPS Office\t12.1');
+  const names = rows.map((r) => r.name);
+  assert.ok(names.includes('微信'), `CJK 2 字名「微信」应保留，实际 ${JSON.stringify(names)}`);
+  assert.ok(names.includes('迅雷'), `CJK 2 字名「迅雷」应保留`);
+  assert.ok(!names.includes('AB'), '拉丁 2 字名 AB 仍应被过滤（登记价值低）');
+  assert.ok(names.includes('WPS Office'));
+});
+
 // ── T12 (v3) 硬件/软件纳入检索与引导 ────────────────────────────────────
 test('matcher+guidance: 硬件/软件条目可被检索，缺失时按类型引导（v3 验收）', () => {
   const entries = [

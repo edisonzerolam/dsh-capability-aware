@@ -15,6 +15,12 @@
 每条条目都带 `authority`（权威归属：system/how/note）与 `bounds`（适用范围/限制/前置），查询答案里直接透出。
 本机环境速查入口见技能 `capability-lookup`。
 
+### 自供给（装上即得）
+
+- **技能入口**（默认开）：安装后首次启动自动把 `capability-lookup` 技能写入 `~/.dsh/skills/`（幂等带版本戳），harness 的技能目录即出现本能力，无需手工配置；
+- **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——「环境依赖类任务先跑 `cap.mjs brief`」。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
+  实测依据：一天运行日志显示后台扫描 103 次/0 错误，但 harness 主动调用 0 次——缺的就是这个必经触发点。
+
 自动扫描并维护 DSH 的能力清单（插件 / 技能 / 记忆 / 连接器 / 自动化 / CLI 工具 / **本机环境** / **硬件** / **软件**），
 按任务意图快速匹配能力及调用方式，能力缺失时给出针对性补足引导。
 
