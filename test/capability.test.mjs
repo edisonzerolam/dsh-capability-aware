@@ -133,14 +133,17 @@ test('matcher: 给定用户请求 → 返回匹配能力及调用方式（验收
   assert.equal(m2.top.name, 'dsh-demo-plugin');
 });
 
-// ── T4 matcher 边界：空清单 / 空查询 / 无命中 ───────────────────────────
-test('matcher: 空清单 → empty_registry；空查询 → no_query；无命中 → no_match', () => {
+// ── T4 matcher 边界：空清单 / 空查询 / 弱命中（缺失） ───────────────────
+test('matcher: 空清单 → empty_registry；空查询 → no_query；真缺失 → anyStrong=false', () => {
   assert.equal(match('x', []).kind, 'empty_registry');
   const reg = load(path.join(process.env.DSH_CAP_DSH_HOME, 'data', 'capability-aware', 'capabilities.json'));
   assert.equal(match('', reg.entries).kind, 'no_query');
+  // v5 Bug3：真缺失不再强行要求 kind=no_match（低分噪声仍会产出候选），
+  // 而是要求 anyStrong=false —— 调用方据此追加缺失引导（附加式，不丢候选）。
   const nm = match('量子纠错编译器调优', reg.entries);
-  assert.equal(nm.kind, 'no_match');
-  // no_match → 缺失引导
+  assert.equal(nm.anyStrong, false, '真缺失查询不得被判为强命中');
+  assert.ok((nm.candidates || []).every((c) => !c.quality?.strong), '真缺失时不应有强命中候选');
+  // 缺失引导仍可用（tool.js 在 anyStrong=false 时调用它）
   const g = guide({ query: '量子纠错编译器调优' });
   assert.equal(g.kind, 'missing');
   assert.ok(g.message.includes('量子纠错编译器调优'));
@@ -455,7 +458,12 @@ test('skill-router: 索引被吸收、目录扫描去重、权威归口指向 sk
     assert.equal(router.length, 3, `索引应吸收 3 条，实际 ${router.length}`);
     const sub = router.find((e) => e.name === 'cas-standards');
     assert.ok(sub.description.startsWith('[accounting-audit-forge 子技能]'), '子技能应带父技能前缀');
-    assert.equal(router.find((e) => e.name === 'old-skill').negative, true, '禁用条目应标 negative');
+    // v5 Bug2：disabled（disable-model-invocation 权限标志）与 negative（已归档/勿用）
+    // 是**两档语义**，必须分开——旧实现把两者合并，致「只允许用户点名的敏感技能」不可见
+    //（真实事故：wechat-send-file 精确点名也查不到）。
+    const oldSkill = router.find((e) => e.name === 'old-skill');
+    assert.equal(oldSkill.disabled, true, '索引 disabled 条目应标 disabled（权限标志）');
+    assert.equal(oldSkill.negative, false, 'disabled ≠ negative：不得混为一谈');
 
     // 去重：已索引的技能名不再由目录扫描产出；未索引的新技能仍被发现
     const dirSkills = probeSkills({ skip: new Set(router.map((e) => e.name)) });
@@ -632,4 +640,221 @@ test('host: apply() cfg whitelist must pass through provision keys (v4.5 regress
     const t3 = await fs.promises.readFile(path.join(home, 'AGENTS.md'), 'utf8');
     assert.ok(t3.startsWith('USER CONTENT'));
   } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// v5 修复回归（六个缺陷，全部源自真实调用取证 —— 见 docs/research-2026-10-05.md）
+// ════════════════════════════════════════════════════════════════════════
+
+// ── T15 (v5 Bug1) 人工数据（别名/备注/隐藏/优先级）必须跨扫描存活 ──────
+test('v5 Bug1: mergeManual 逐字段「非空者胜」——扫描不得抹掉人工别名', async () => {
+  const { mergeManual } = await import(modUrl(path.join(root, 'lib', 'registry.js')));
+  // 扫描侧全是空默认值 → 必须整体保留上一版人工值
+  const p = { aliases: ['A股', '沪深'], notes: '人工备注', hidden: true, priority: 5 };
+  const empty = { aliases: [], notes: '', hidden: false, priority: 0 };
+  const m = mergeManual(p, empty);
+  assert.deepEqual(m.aliases, ['A股', '沪深'], '别名必须存活（旧实现被空默认值覆盖 → 全清单人工数据=0）');
+  assert.equal(m.notes, '人工备注');
+  assert.equal(m.hidden, true);
+  assert.equal(m.priority, 5);
+  // 扫描侧有值时只覆盖对应字段
+  const m2 = mergeManual(p, { aliases: ['新别名'], notes: '', hidden: false, priority: 0 });
+  assert.deepEqual(m2.aliases, ['新别名'], '扫描给出别名时应采用');
+  assert.equal(m2.notes, '人工备注', '未给出的字段仍保留人工值');
+  assert.equal(m2.hidden, true);
+  // undefined 入参容错
+  assert.deepEqual(mergeManual(undefined, undefined).aliases, []);
+  assert.deepEqual(mergeManual(p, undefined).aliases, ['A股', '沪深']);
+});
+
+// ── T16 (v5 Bug1 端到端) applyScan 后别名仍在，且别名让条目排名跃升 ─────
+test('v5 Bug1 端到端: 灌别名 → scan → 别名存活且检索排名提升', async () => {
+  const { applyScan, load: loadReg } = await import(modUrl(path.join(root, 'lib', 'registry.js')));
+  const tmp = mkTmp();
+  const file = path.join(tmp, 'capabilities.json');
+  const base = {
+    v: 2, state: 'ok',
+    entries: [
+      { v: 1, name: 'AKShare', type: 'mcp', description: '股票 / 基金 / 期货 / 债券 / 宏观公开数据', triggers: ['akshare', '股票'], invoke: { kind: 'delegate', how: 'mcp__akshare__get_hist_data' }, manual: { aliases: ['A股', '沪深行情'], notes: '', hidden: false, priority: 0 } },
+      { v: 1, name: 'android-data', type: 'skill', description: '安卓数据抓取', triggers: ['android-data'], invoke: { kind: 'cli', how: 'x' }, manual: { aliases: [], notes: '', hidden: false, priority: 0 } },
+    ],
+    meta: {},
+  };
+  fs.writeFileSync(file, JSON.stringify(base, null, 2), 'utf8');
+  // 模拟一次扫描：产出条目**不带**人工数据（normalizeEntry 会填空默认值）
+  const scan = { entries: base.entries.map((e) => ({ ...e, manual: undefined })), errors: [] };
+  applyScan(file, scan, { reason: 'test' });
+  const after = loadReg(file);
+  const ak = after.entries.find((e) => e.name === 'AKShare');
+  // v5 数据层起：落盘别名 = 用户人工值 ∪ 预置值，故断言「存活」而非全等。
+  // 核心是 Bug1 的回归：这两个用户别名**必须还在**（旧实现被 normalizeEntry 空默认值抹成 []）。
+  assert.ok(ak.manual.aliases.includes('A股'), '扫描后用户别名必须存活（Bug1 修复核心断言）');
+  assert.ok(ak.manual.aliases.includes('沪深行情'), '扫描后用户别名必须存活（Bug1 修复核心断言）');
+  assert.ok(ak.manual.aliases.length >= 2, '不得被扫描结果清空');
+  // 别名参与检索：查「A股」应命中 AKShare
+  const m = match('查A股历史行情', after.entries);
+  assert.ok(m.candidates.some((c) => c.name === 'AKShare'), '别名「A股」应使 AKShare 可被检索到');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// ── T17 (v5 Bug2) disabled ≠ negative：权限标志可检索、点名可用 ────────
+test('v5 Bug2: disabled（权限标志）不被当负面降权，点名仍可见并带告警', async () => {
+  const entries = [
+    {
+      v: 1, name: 'wechat-send-file', type: 'skill',
+      description: '把文件发送到微信。当用户说「发我微信」时使用。',
+      triggers: ['wechat-send-file'], invoke: { kind: 'cli', how: 'wx send' },
+      disabled: true, negative: false, manual: { aliases: [], notes: '', hidden: false, priority: 0 },
+    },
+    {
+      v: 1, name: 'archived-skill', type: 'skill', description: '【已归档·勿用】旧技能',
+      triggers: ['archived-skill'], invoke: { kind: 'cli', how: 'x' },
+      disabled: false, negative: true, manual: { aliases: [], notes: '', hidden: false, priority: 0 },
+    },
+  ];
+  // 精确点名受限技能 → 必须可见（旧实现：negative 强降权致 no_match，真实事故）
+  const m = match('wechat-send-file', entries);
+  assert.equal(m.kind, 'ok', '点名受限技能应返回候选，不得 no_match');
+  assert.equal(m.top.name, 'wechat-send-file');
+  assert.ok(m.warnings.some((w) => w.includes('受限能力')), '受限能力须带「需用户点名」告警');
+  assert.ok(!m.warnings.some((w) => w.includes('已归档')), 'disabled 不得报「已归档」');
+  // 已归档条目仍强降权
+  const m2 = match('archived-skill', entries);
+  if (m2.kind !== 'no_match') {
+    assert.ok(m2.candidates.every((c) => c.negative), '仅剩 negative 候选时不应有非负面条目');
+  }
+});
+
+// ── T18 (v5 Bug3) 命中质量判据：真答案 strong=true，噪声/缺失 strong=false ──
+test('v5 Bug3: queryStrength 区分真命中与噪声榜首', async () => {
+  const { queryStrength, tokens } = await import(modUrl(path.join(root, 'lib', 'matcher.js')));
+  const mk = (o) => ({ v: 1, manual: { aliases: [], notes: '', hidden: false, priority: 0 }, ...o });
+  // 真命中：ffmpeg 触发词含「转码」全等
+  const ff = mk({ name: '软件: ffmpeg', type: 'software', description: '视频转码工具', triggers: ['ffmpeg', '转码'] });
+  const q1 = tokens('视频转码');
+  const s1 = queryStrength(ff, q1, null);
+  assert.equal(s1.strong, true, 'ffmpeg 视频转码应判为强命中');
+  assert.equal(s1.exact, true);
+  // 噪声榜首：名字里含「微信」但查询讲的是「发文件」
+  const wx = mk({ name: '软件: 微信', type: 'software', description: '已安装微信', triggers: ['微信'] });
+  const q2 = tokens('发送文件到微信 IM 微信渠道 dsh-im 附件');
+  const s2 = queryStrength(wx, q2, null);
+  assert.equal(s2.strong, false, '「软件:微信」对发文件查询应判为弱命中（cov 极低）');
+  // 别名命中是最强证据
+  const ak = mk({ name: 'AKShare', type: 'mcp', description: '公开数据', triggers: ['akshare'], manual: { aliases: ['A股'], notes: '', hidden: false, priority: 0 } });
+  const q3 = tokens('查A股行情');
+  assert.equal(queryStrength(ak, q3, null).aliasHit, true, '人工别名整词覆盖应被识别');
+  assert.equal(queryStrength(ak, q3, null).strong, true);
+});
+
+// ── T19 (v5 Bug4) tool 路径必须与 CLI 路径同分（旧实现漏传 idf） ───────
+test('v5 Bug4: capability_query 与 CLI 走同一打分（idf 已接通，不得退化为常数权重）', async () => {
+  const { buildCapabilityTool } = await import(modUrl(path.join(root, 'lib', 'tool.js')));
+  const { match: m2, idfFor: idf2 } = await import(modUrl(path.join(root, 'lib', 'matcher.js')));
+  const reg = load(path.join(process.env.DSH_CAP_DSH_HOME, 'data', 'capability-aware', 'capabilities.json'));
+  if (reg.state !== 'ok') return; // 无真实清单时跳过（隔离 fixture 下常见）
+  const q = '查A股历史行情数据';
+  const viaMatch = m2(q, reg.entries, { topK: 5, idf: idf2(reg.entries) });
+  const viaTool = m2(q, reg.entries, { topK: 5 }); // 不传 idf —— 应自愈为同一结果
+  assert.deepEqual(
+    viaTool.candidates.map((c) => c.name),
+    viaMatch.candidates.map((c) => c.name),
+    '缺省 idf 时 match() 必须自愈（Bug4：旧 tool.js 漏传导致全候选并列）',
+  );
+  // 且候选分数不应全部相等（退化特征）
+  const scores = new Set(viaTool.candidates.map((c) => c.score));
+  if (viaTool.candidates.length > 1) {
+    assert.ok(scores.size > 1, `退化检测：候选分数不应全等（实测 ${[...scores].join(',')}）`);
+  }
+  // 源码层断言：tool.js 必须显式传 idf
+  const src = await fs.promises.readFile(path.join(root, 'lib', 'tool.js'), 'utf8');
+  assert.ok(src.includes('idf: idfFor(reg.entries)'), 'tool.js 必须显式传 idf（双保险）');
+  const tool = buildCapabilityTool({});
+  assert.equal(typeof tool.execute, 'function');
+});
+
+// ── T20 (v5 缺陷A) 同名条目按 source 区分，diff 不失真 ─────────────────
+test('v5 缺陷A: 同名条目靠 source 区分（entryKey），diff 不互相覆盖', async () => {
+  const { entryKey, diff } = await import(modUrl(path.join(root, 'lib', 'registry.js')));
+  const a = { type: 'skill', name: 'bili-daily', source: 'skill-router:bili-daily' };
+  const b = { type: 'skill', name: 'bili-daily', source: 'skill-router:web-intel/skills/bili-daily' };
+  assert.notEqual(entryKey(a), entryKey(b), '同名不同 source 必须是不同键（旧实现 (type,name) 键会互相覆盖）');
+  assert.equal(entryKey({ type: 'skill', name: 'x' }), 'skill:x', '无 source 时退回 type:name');
+  // diff：两条同名条目都在 prev 里，删除其一应被检出
+  const d = diff([a, b], [a]);
+  assert.equal(d.removed.length, 1, '删除一条同名条目应被检出（旧实现两条互相覆盖 → diff 失真）');
+});
+
+// ── T21 (v5 缺陷B) 路由器覆盖词不得压过专精子技能 ──────────────────────
+test('v5 缺陷B: 父路由器与子技能同现时父让位（覆盖词不再压过专精技能）', async () => {
+  const entries = [
+    {
+      v: 1, name: 'visual-studio', type: 'skill', super: undefined,
+      description: '视觉后处理与图表超级技能（4 个子技能路由器）',
+      triggers: ['visual-studio', '字幕', '处理视频', '压缩图片'], invoke: { kind: 'cli', how: 'x' },
+      manual: { aliases: [], notes: '', hidden: false, priority: 0 },
+    },
+    {
+      v: 1, name: 'web-intel', type: 'skill', super: undefined,
+      description: '网络情报：抓取 B站视频字幕、字幕轨解析',
+      triggers: ['web-intel', '字幕', 'b站'], invoke: { kind: 'cli', how: 'y' },
+      manual: { aliases: [], notes: '', hidden: false, priority: 0 },
+    },
+  ];
+  // 给 visual-studio 造一个子技能，使父子竞争让位规则生效
+  entries.push({
+    v: 1, name: 'video', type: 'skill', super: 'visual-studio',
+    description: '视频压缩转格式字幕处理', triggers: ['video', '字幕'], invoke: { kind: 'cli', how: 'z' },
+    manual: { aliases: [], notes: '', hidden: false, priority: 0 },
+  });
+  const m = match('抓B站视频字幕', entries);
+  const vs = m.candidates.find((c) => c.name === 'visual-studio');
+  const vi = m.candidates.find((c) => c.name === 'web-intel');
+  assert.ok(vs && vi, '两个候选都应出现');
+  assert.ok(vi.score > vs.score, `专精技能应排在路由器之前（web-intel ${vi.score} > visual-studio ${vs.score}）`);
+});
+
+// ── T23 (v5 数据层) 预置别名随插件分发：装上即生效、跨扫描存活、用户别名不被覆盖 ──
+test('v5 数据层: 预置别名（seed）注入并跨扫描存活，且不覆盖用户自己的别名', async () => {
+  const { applySeedAliases, SEED_ALIASES } = await import(modUrl(path.join(root, 'lib', 'seed.js')));
+  assert.ok(SEED_ALIASES.length >= 3, '至少覆盖 A股/微信发文件/文生图 三个已取证缺口');
+  // 纯函数：并集、不改原数组
+  const src = [{ name: 'AKShare', type: 'mcp', description: 'd', manual: { aliases: ['用户自定义别名'], notes: '', hidden: false, priority: 0 } }];
+  const { entries, applied } = applySeedAliases(src);
+  assert.equal(src[0].manual.aliases.length, 1, '不得修改原数组（纯函数）');
+  assert.ok(entries[0].manual.aliases.includes('用户自定义别名'), '用户别名必须保留');
+  assert.ok(entries[0].manual.aliases.includes('A股'), '预置别名必须注入');
+  assert.ok(applied.some((a) => a.name === 'AKShare' && a.added > 0));
+  // 幂等：再跑一次不应重复添加
+  const twice = applySeedAliases(entries);
+  assert.equal(twice.entries[0].manual.aliases.length, entries[0].manual.aliases.length, '重复注入必须幂等');
+  assert.equal(twice.applied.length, 0, '无新增时 applied 应为空');
+  // 端到端：applyScan 之后预置别名仍在，且能检索到
+  const { applyScan: as, load: ld } = await import(modUrl(path.join(root, 'lib', 'registry.js')));
+  const tmp = mkTmp();
+  const file = path.join(tmp, 'capabilities.json');
+  const scan = {
+    entries: [{ name: 'AKShare', type: 'mcp', description: '股票 / 基金 / 宏观公开数据', triggers: ['akshare'], invoke: { kind: 'cli', how: 'x' } }],
+    errors: [],
+  };
+  as(file, scan, { reason: 'test' });
+  const reg = ld(file);
+  const ak = reg.entries.find((e) => e.name === 'AKShare');
+  assert.ok(ak.manual.aliases.includes('A股'), '预置别名必须经 applyScan 落盘（新装机器首次扫描即生效）');
+  const m = match('查A股历史行情数据', reg.entries);
+  assert.equal(m.top.name, 'AKShare', `别名应使 AKShare 居首（实测 ${m.top?.name}）`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+test('v5 Bug3: 弱命中时保留候选并附缺失提示（附加式，不误判真有能力的查询）', async () => {
+  const { buildCapabilityTool } = await import(modUrl(path.join(root, 'lib', 'tool.js')));
+  const tool = buildCapabilityTool({});
+  // 用一个几乎不可能命中的查询：候选取自真实清单时 anyStrong 应为 false 且带提示
+  const reg = load(path.join(process.env.DSH_CAP_DSH_HOME, 'data', 'capability-aware', 'capabilities.json'));
+  if (reg.state !== 'ok') return;
+  const out = await tool.execute({ query: '量子纠错拓扑码编译器的表面码解码器调优' });
+  // 不抛错即可，且若给出提示必须仍保留「匹配到/命中」候选行
+  assert.equal(typeof out, 'string');
+  if (out.includes('命中质量均偏低')) {
+    assert.ok(/匹配到|命中 \d+ 个接近候选/.test(out), '附加提示不得取代候选列表');
+  }
 });

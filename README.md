@@ -38,6 +38,26 @@
 > 补 `top` 字段；⑤ IDF 现算语料含 aliases。依据：[docs/research-2026-10-05.md](docs/research-2026-10-05.md)
 > （MCP 官方 registry/server.json/低频拉取 调研蒸馏）。
 
+> **v5 / v0.6.0（2026-10-07）**：**基于真实调用取证**的六缺陷修复——不是纸面推演，全部由
+> 36 小时会话日志里挖出的真实失败案例驱动（详见 [docs/research-2026-10-05.md](docs/research-2026-10-05.md)）。
+>
+> | # | 缺陷 | 真实事故 | 修法 |
+> |---|---|---|---|
+> | 1 | **人工数据被扫描抹平** | `manual.aliases` 被 `normalizeEntry` 的空默认值覆盖 → 全清单 563 条带人工数据者 **0**；灌入 AKShare 别名后排名 12 → **1** | `mergeManual()` 逐字段「非空者胜」 |
+> | 2 | **受限技能被当废弃技能** | `disable-model-invocation`（权限标志）与「已归档/勿用」被合并成同一 `negative` → `wechat-send-file` 连**精确点名都返回 no_match** | 拆成 `disabled` / `negative` 两档语义：前者可检索、点名可用、带告警；后者才强降权 |
+> | 3 | **缺失被伪装成有候选** | 单字 CJK 几乎命中每条中文描述 → 「文生图」6 条并列 12.61 的**噪声地板** | desc 命中禁单字；新增 `queryStrength`（cov/exact/aliasHit）判据，弱命中**保留候选 + 附加缺失提示**（不误杀真有能力的查询） |
+> | 4 | **agent 走的是退化路径** | `tool.js` 漏传 `idf` → 退化为常数权重，实测「查A股」全候选**并列 16 分**；此前所有 CLI 验证都没覆盖 agent 真实路径 | `match()` 缺省 idf 自愈 + `tool.js` 显式传参（双保险） |
+> | A | **同名条目互相覆盖** | 清单存在 18 组同名条目（`bili-daily` 顶层 vs web-intel 子技能、`skill-creator` 3 条）→ `(type,name)` 键致 diff 失真 | `entryKey()` 带上 `source` |
+> | B | **路由器覆盖词压过专精技能** | `visual-studio`（4 子技能路由器）靠 `字幕` 触发词压过真正的字幕技能 | 父子竞争让位（父 ×0.7）+ 单字拉丁权重 0.5（治「抓**B**站」里单字 `b` 贡献 +43.47） |
+>
+> **数据层（新增 `lib/seed.js`）**：预置人工别名**随插件分发**，首次扫描即注入且跨扫描存活——
+> 新装机器装上就修好词表鸿沟，无需手工 `cap.mjs alias`。当前覆盖三处已取证缺口：
+> `AKShare`（A股/沪深/行情数据…）、`wechat-send-file`（发我微信/发到微信…）、
+> `imagegen-frontend-web`（文生图/图像生成…，仅解决可检索性，其边界由条目自身说明）。
+> 语义为**并集**：用户自己加的别名永不被覆盖。
+>
+> 测试 20 → **29 全绿**（新增 T15–T23 逐条锁死上述修复，含源码级断言防回归）。
+
 ## 三个核心功能
 
 | 功能 | 实现 | 入口 |
@@ -150,16 +170,26 @@ Web/RPC 面（`/capability-aware/query|list|scan|guide`）按最小赌注接入�
 ## 测试
 
 ```powershell
-npm test   # node --test test/ —— 12 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
+npm test   # node --test test/ —— 29 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
+# 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件：
+node --test test/capability.test.mjs
 ```
 
 覆盖：探针映射先验（≥1 命中才信整批）、落盘幂等、验收 A（匹配+调用方式）、
 验收 B（移除检测+针对性引导）、空清单/空查询/无命中、多候选澄清、类型猜测、schema 校验、
-v3 增补（MCP 真实结构探针/虚拟显卡排除/注册表解析噪声过滤/硬件软件检索与引导）。
+v3 增补（MCP 真实结构探针/虚拟显卡排除/注册表解析噪声过滤/硬件软件检索与引导）、
+**v5 六缺陷回归 T15–T23**（`mergeManual` 别名存活 / 端到端灌别名→scan→存活 / disabled≠negative /
+`queryStrength` 真命中 vs 噪声榜首 / Bug4 idf 自愈 + 源码断言 / `entryKey` 同名不同源 /
+父子竞争让位 / 预置别名幂等且不覆盖用户别名 / 弱命中保留候选）。
 
 ## 已知边界（未验证 / 待做）
 
 - RPC 路由面未在真实宿主验证过 RPC 签名（boot 扫描 + CLI 已实证）；接 GUI 面板时再验。
 - software 注册表探针依赖 PowerShell；非 Windows 环境该探针报错并计入 probeErrors（其余探针不受影响）。
 - knowledge 探针只做数据目录存在性，不做内容断言。
-- 检索仍是 keyword 层：同义词鸿沟靠 `alias` 人工策展；>1000 条或别名维护成本上升时再评估 embedding 路线。
+- 检索仍是 keyword 层：同义词鸿沟靠**预置别名（`lib/seed.js`）+ `alias` 人工策展**；预置集只收
+  有真实取证支撑的缺口，不做无差别铺词。>1000 条或别名维护成本上升时再评估 embedding 路线。
+- `queryStrength` 是**附加提示**而非排序信号（设计取舍：宁可多一句提示，也不把真有能力的查询误判为缺失）；
+  最坏情况是提示多余，不会丢候选。
+- 预置别名按条目 `name`（+可选 `type`）匹配；同名条目（如 `imagegen-frontend-web` 有两条）
+  会同时命中，这是刻意的（同名即同能力语义）。
