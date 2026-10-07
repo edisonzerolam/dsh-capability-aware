@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { provisionAgentsPointer } from '../lib/provision.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -610,4 +611,25 @@ test('host: watch=false 无监听 effect；schema 保留 mcp disabled 字段', a
   assert.equal(r.entry.disabled, true, 'disabled 必须被 schema 保留（v3 曾静默丢弃）');
   const r2 = normalizeEntry({ name: 'Y conn', type: 'mcp', description: 'd' });
   assert.equal(r2.entry.disabled, false);
+});
+test('host: apply() cfg whitelist must pass through provision keys (v4.5 regression: missing keys made AGENTS pointer dead code)', async () => {
+  const idx = await fs.promises.readFile(new URL('../lib/index.js', import.meta.url), 'utf8');
+  assert.ok(idx.includes('provisionSkill: config?.provisionSkill !== false'));
+  assert.ok(idx.includes('provisionAgentsPointer: config?.provisionAgentsPointer === true'));
+  assert.ok(idx.includes('cfg.provisionAgentsPointer === true'));
+  assert.ok(idx.includes('cfg.provisionSkill !== false'));
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-agents-'));
+  try {
+    const home = path.join(tmp, 'dsh');
+    const r1 = provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    assert.equal(r1.action, 'created');
+    const t1 = await fs.promises.readFile(path.join(home, 'AGENTS.md'), 'utf8');
+    assert.ok(t1.includes('managed:begin') && t1.includes('managed:end') && t1.includes('cap.mjs'));
+    const r2 = provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    assert.equal(r2.action, 'unchanged');
+    await fs.promises.writeFile(path.join(home, 'AGENTS.md'), ['USER', 'CONTENT'].join(' '), 'utf8');
+    provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    const t3 = await fs.promises.readFile(path.join(home, 'AGENTS.md'), 'utf8');
+    assert.ok(t3.startsWith('USER CONTENT'));
+  } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
 });
