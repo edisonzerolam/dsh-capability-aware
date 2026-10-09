@@ -1,6 +1,6 @@
 # dsh-capability-aware bundle 层 —— 自我能力感知插件。
 #
-# build: 2026-10-06-v4.5-agents-pointer（本地适配标记。改 lib/*.js 后**同时**动这一行，
+# build: 2026-10-10-v0.7.0-prompt-section（本地适配标记。改 lib/*.js 后**同时**动这一行，
 #        才能触发 DSH 的 patchReload: live 重载插件；实测只改 lib 不会重载）
 #
 # 注意（YAML 陷阱，harness-ops §E 实证）：
@@ -20,6 +20,12 @@
 #      需要的本机可在宿主 profile 侧覆盖为 true。开启后幂等维护、插件升级自动刷新。
 #      开启理由（本机裁决 2026-10-06）：一天实测 harness 0 次主动调用，环境类任务缺一个
 #      必经触发点；本块即该触发点。
+#  promptSection: v0.7.0 常驻指令面——用宿主公开的 ctx.systemPrompt.section() 注入一段
+#      「任务依赖本机环境时起手先 capability_query」的行为规约（默认 true）。
+#      **这是「安装即达到应有水平」的关键**：完全不改用户任何文件（不写 AGENTS.md、
+#      不写用户技能目录以外的地方），纯运行时贡献，卸载插件即消失。
+#      与 provisionAgentsPointer 的取舍：后者改用户文件故默认关闭、安装者不可复现；
+#      本项默认开启且跨机可复现。两者内容重叠，装到哪台机器都生效的是本项。
 - insert:
     - id: dsh-capability-aware
       name: dsh-capability-aware
@@ -32,3 +38,4 @@
         periodicMs: 1200000
         provisionSkill: true
         provisionAgentsPointer: false
+        promptSection: true

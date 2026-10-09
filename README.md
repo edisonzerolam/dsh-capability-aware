@@ -17,9 +17,24 @@
 
 ### 自供给（装上即得）
 
+- **常驻指令面**（v0.7.0，默认开）★ 关键：用宿主公开的 `ctx.systemPrompt.section()` 往**系统提示词**注入一段行为规约——「任务依赖本机环境 / 不确定本机有无该能力 / 怀疑能力已消失时，**起手先调 `capability_query`**」，附权威归属与 CLI 兜底。**完全不改用户任何文件**（不写 `AGENTS.md`），纯运行时贡献，卸载即消失，**任何机器装上就复现**；
 - **技能入口**（默认开）：安装后首次启动自动把 `capability-lookup` 技能写入 `~/.dsh/skills/`（幂等带版本戳），harness 的技能目录即出现本能力，无需手工配置；
 - **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——**工具优先**：起手直接调 `capability_query` 工具（不用开终端、不用记路径），CLI 只作兜底/台账/审计。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
   实测依据：一天运行日志显示后台扫描 103 次/0 错误，但 harness 主动调用 0 次——缺的就是这个必经触发点。
+
+> **v0.7.0（2026-10-10）· 常驻指令面：让「全新安装」达到应有水平**
+> **问题**（用户提出）：技能入口会自动出现，但 `~/.dsh/AGENTS.md` 不会被动——意味着**别的机器装了这个插件，
+> 达不到本机水平**；而 AGENTS.md 路线**必须改用户文件**，公共仓库不能替安装者默认改，只能靠本机 profile 覆盖，
+> **不可移植**。根因：常驻指令面里没有本插件的任何痕迹，技能要先被列出/被 router 命中才可能用上，
+> 而「环境类任务起手先查能力」这条**行为规约**根本没进上下文。
+> **解法**：改用宿主**官方公开**的提示词注入点 `ctx.systemPrompt.section({name, order, text})`
+> （权威写法对照 `@deepseek-ai/dsh-mcp-resources/lib/index.js:118-130`）。
+> 位次取 **2950**，经与宿主 `SECTION_ORDERS` 全表交叉核对无碰撞（落在 `TOOL_REPORT:2900` 与 `TOOL_COMPUTER_USE:3000` 空档）。
+> 两个坑已避：① 用 `ctx.inject(['systemPrompt'])` **软注入**，硬声明 `export const inject` 会让极简 profile 整体 pending；
+> ② 注册用 `scoped.effect(...)` 包裹，否则热重载在同层重复注册会 throw（宿主 `section()` 明确如此规定）。
+> **实证**（非纸面）：真实 cordis `Context` + 真实 `SystemPrompt` 服务下 `section()` 接受注册、`renderPrompt()` 输出含本段正文；
+> 隔离真空 `DSH_CAP_HOME` 跑真实 `apply()` → `promptSection` 段注册、技能 v0.7.0 落盘、`AGENTS.md` **未**被创建。
+> 回归测试 T28–T30，全套 **36/36 绿**。
 
 > **v0.6.1（2026-10-09）· 缺陷 #7：监听过宽致写放大（运行体检取证）**
 > 反应式监听原本裸听整个 `~/.dsh/storages` 与 `~/.dsh/memory`。实测：`~/.dsh/storages/whale.json`
@@ -182,7 +197,7 @@ Web/RPC 面（`/capability-aware/query|list|scan|guide`）按最小赌注接入�
 ## 测试
 
 ```powershell
-npm test   # node --test test/capability.test.mjs —— 33 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
+npm test   # node --test test/capability.test.mjs —— 36 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
 # 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件。
 ```
 
@@ -193,7 +208,11 @@ v3 增补（MCP 真实结构探针/虚拟显卡排除/注册表解析噪声过�
 `queryStrength` 真命中 vs 噪声榜首 / Bug4 idf 自愈 + 源码断言 / `entryKey` 同名不同源 /
 父子竞争让位 / 预置别名幂等且不覆盖用户别名 / 弱命中保留候选）、
 **v0.6.1 缺陷 #7 回归 T24–T27**（监听根 accept 白名单源码级断言 + 真实 `fs.watch` 行为级验证
-whale.json 被挡而 mcp_connector.json 放行 / 工具优先文案断言 / 版本戳一致）。
+whale.json 被挡而 mcp_connector.json 放行 / 工具优先文案断言 / 版本戳一致）、
+**v0.7.0 常驻指令面回归 T28–T30**（`promptSectionText` 含行为规约/工具名/权威归属且工具优先；
+`mountPromptSection` 软注入 `['systemPrompt']` + order 有限且落 2900..3000 空档 + `text` 函数形态 +
+`effect` 包裹 + 可关闭；`index.js` 接线且 `promptSection` 默认开启、仍**不**硬声明 `inject`、
+AGENTS 指针仍默认关闭）。
 
 ## 已知边界（未验证 / 待做）
 
@@ -213,5 +232,9 @@ whale.json 被挡而 mcp_connector.json 放行 / 工具优先文案断言 / 版�
 - **仍未做（有意的权衡）**：`applyScan` 落盘守卫（条目指纹未变则跳过写盘）未实施——完全不写盘会让
   `meta.lastScanAt` 老化并触发 `lib/doctor.js:29-38` 的 `STALE_SCAN`（warn，阈值 24h）误报，
   需要「内容不变但仅刷新扫描时间」的轻量策略。白名单已消掉 90% 噪声，暂不引入这个复杂度。
+- **v0.7.0 常驻指令面用的是宿主 `systemPrompt.section()`**，位次 2950（`TOOL_REPORT:2900` 与
+  `TOOL_COMPUTER_USE:3000` 之间空档）。该位次若与将来新增的宿主段冲突，宿主会在同层重复注册时
+  抛错（可见、不静默）；届时改 `lib/prompt-section.js` 的 `SECTION_ORDER` 即可。
+  本段是**常驻**的，会占用每轮少量上下文（正文约 460 字符）；不想要可在 profile 侧设 `promptSection: false`。
 - 与本插件无关的顺带发现（未处理）：`~/.dsh/storages` 下有 23 个 `.*.tmp` 共约 722 MB，
   内容为 `{"unit":{"name":"whale",...}}`，疑为 whale 插件原子写残留，**未删除**（删前须核实引用）。

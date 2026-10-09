@@ -384,7 +384,7 @@ test('host: apply() 经 ctx.inject 软注入注册 /api/capability-aware/* 且 h
   };
   mod.apply(ctx, { scanOnBoot: false, watch: true, periodicMs: 0, scanDelayMs: 0 });
 
-  assert.deepEqual(injected.sort(), ['tools', 'webServer'], '应以软注入方式请求 webServer 与 tools');
+  assert.deepEqual(injected.sort(), ['systemPrompt', 'tools', 'webServer'], '应以软注入方式请求 systemPrompt 与 webServer 与 tools');
   const paths = registered.map((r) => r.path).sort();
   assert.deepEqual(
     paths,
@@ -555,7 +555,8 @@ test('host: apply() 同时软注入 tools 与 webServer（agent 入口 + RPC 入
     inject(deps, cb) { injected.push(deps.join(',')); cb(scoped); },
   };
   mod.apply(ctx, { scanOnBoot: false, watch: false, periodicMs: 0 });
-  assert.deepEqual(injected.sort(), ['tools', 'webServer'], `应软注入 tools 与 webServer，实际 ${injected}`);
+  // v0.7.0 起常驻指令面也要软注入 systemPrompt → 三面齐备（指令面/工具面/RPC 面）。
+  assert.deepEqual(injected.sort(), ['systemPrompt', 'tools', 'webServer'], `应软注入 systemPrompt 与 tools 与 webServer，实际 ${injected}`);
   // 注：本仓库环境无 @deepseek-ai/dsh-tools，动态 import 会走 .catch 降级——
   // 这正是设计意图（宿主包不可用时工具面降级，CLI/RPC 不受影响），故此处不断言工具注册成功。
 });
@@ -969,4 +970,76 @@ test('v0.6.1: PLUGIN_VERSION 与 package.json 版本一致', async () => {
   const v = (idx.match(/PLUGIN_VERSION = '([^']+)'/) || [])[1];
   assert.ok(v, '取不到 PLUGIN_VERSION');
   assert.equal(v, pkg.version, `PLUGIN_VERSION(${v}) 必须等于 package.json(${pkg.version})`);
+});
+
+// ── v0.7.0：常驻指令面（系统提示词段），「安装即得」的关键 ──────────────
+
+// T28 纯净函数：注入正文必须自带行为规约与权威归属
+test('v0.7.0: promptSectionText 含行为规约、工具名与权威归属', async () => {
+  const { promptSectionText, SECTION_NAME, SECTION_ORDER } = await import(modUrl(path.join(root, 'lib', 'prompt-section.js')));
+  const t = promptSectionText('9.9.9');
+  assert.ok(t.includes('9.9.9'), '正文须带版本戳（便于排查活体跑的是哪版）');
+  assert.ok(t.includes('capability_query'), '正文必须点名 capability_query 工具');
+  assert.ok(/起手先调/.test(t), '正文必须给出可执行的触发规约，而非泛泛介绍');
+  assert.ok(/skill-use-router|skill_index\.py/.test(t), '正文须给出权威归属（技能路由）');
+  assert.ok(/memory_search/.test(t), '正文须给出权威归属（记忆）');
+  assert.ok(/cap\.mjs/.test(t), '正文须保留 CLI 兜底入口');
+  const tq = t.indexOf('capability_query');
+  const tc = t.indexOf('cap.mjs');
+  assert.ok(tq < tc, '正文须工具优先（capability_query 早于 cap.mjs）');
+  assert.equal(SECTION_NAME, 'capability-aware:capability-index');
+  // 位次须避开既有槽位（SECTION_ORDERS: TOOL_REPORT=2900, TOOL_COMPUTER_USE=3000）
+  assert.ok(SECTION_ORDER > 2900 && SECTION_ORDER < 3000, `order(${SECTION_ORDER}) 须落在 2900..3000 空档`);
+});
+
+// T29 挂载契约：软注入 systemPrompt + effect 包裹 + 幂等/可关闭
+test('v0.7.0: mountPromptSection 经 ctx.inject 软注入并注册 section', async () => {
+  const { mountPromptSection } = await import(modUrl(path.join(root, 'lib', 'prompt-section.js')));
+  const sections = [];
+  const effects = [];
+  let injected = null;
+  const fakeCtx = {
+    inject(services, cb) {
+      injected = services;
+      cb({
+        systemPrompt: {
+          section(s) { sections.push(s); return () => {}; },
+          getSectionOrder(n) { return { TOOL_COMPUTER_USE: 3000 }[n]; },
+        },
+        effect(fn) { effects.push(fn()); },
+      });
+    },
+  };
+  const r = mountPromptSection(fakeCtx, { version: '9.9.9', log() {}, warn() {} });
+  assert.equal(r.mounted, true);
+  assert.deepEqual(injected, ['systemPrompt'], '必须软注入 systemPrompt（硬声明会让极简 profile 整体 pending）');
+  assert.equal(sections.length, 1, '恰好注册 1 个段');
+  const s = sections[0];
+  assert.ok(Number.isFinite(s.order), 'order 必须是有限数，否则宿主 section() 抛 TypeError');
+  assert.equal(s.order, 2950, 'order 应取宿主集中的 TOOL_COMPUTER_USE(3000) 之前空档');
+  assert.equal(s.interpolate, false);
+  assert.equal(typeof s.text, 'function', 'text 支持函数形态（随 scope 动态求值，对照 dsh-mcp-resources）');
+  assert.ok(String(s.text({})).includes('capability_query'));
+  assert.equal(effects.length, 1, '注册必须挂在 effect 内，避免热重载重复注册抛错');
+  // 可关闭
+  const off = mountPromptSection(fakeCtx, { enabled: false });
+  assert.equal(off.mounted, false);
+  assert.equal(off.reason, 'disabled');
+});
+
+// T30 源码级防回归 + 接线：index.js 必须真的调用它，且默认开启
+test('v0.7.0: index.js 接线系统提示词段且默认开启（安装即得）', async () => {
+  const idx = await fs.promises.readFile(new URL('../lib/index.js', import.meta.url), 'utf8');
+  assert.ok(idx.includes("from './prompt-section.js'"), 'index.js 必须 import prompt-section');
+  assert.ok(idx.includes('mountPromptSection(ctx,'), 'index.js 必须真的调用 mountPromptSection');
+  assert.ok(/promptSection: config\?\.promptSection !== false/.test(idx), 'promptSection 必须默认开启（!== false 语义）');
+  // 注意：index.js 头注释里**特意写了**反面教材（"用 export const inject = [...] 硬声明 → pending"），
+  // 故断言前必须剥掉注释行，否则会被自己的注释误伤。
+  const code = idx.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.ok(!/export const inject\s*=/.test(code), 'index.js 不得硬声明 inject（会让极简 profile 整体 pending）');
+  // 常驻指令面不得再依赖改用户文件：AGENTS 指针仍须默认关闭
+  assert.ok(/provisionAgentsPointer: config\?\.provisionAgentsPointer === true/.test(idx), 'AGENTS 指针必须仍为默认关闭（不得替安装者改用户文件）');
+  const ps = await fs.promises.readFile(new URL('../lib/prompt-section.js', import.meta.url), 'utf8');
+  assert.ok(ps.includes("ctx.inject(['systemPrompt']"), 'prompt-section 必须软注入');
+  assert.ok(ps.includes('scoped.effect('), 'section 注册必须 effect 包裹');
 });
