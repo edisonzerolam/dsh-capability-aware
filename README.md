@@ -18,8 +18,20 @@
 ### 自供给（装上即得）
 
 - **技能入口**（默认开）：安装后首次启动自动把 `capability-lookup` 技能写入 `~/.dsh/skills/`（幂等带版本戳），harness 的技能目录即出现本能力，无需手工配置；
-- **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——「环境依赖类任务先跑 `cap.mjs brief`」。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
+- **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——**工具优先**：起手直接调 `capability_query` 工具（不用开终端、不用记路径），CLI 只作兜底/台账/审计。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
   实测依据：一天运行日志显示后台扫描 103 次/0 错误，但 harness 主动调用 0 次——缺的就是这个必经触发点。
+
+> **v0.6.1（2026-10-09）· 缺陷 #7：监听过宽致写放大（运行体检取证）**
+> 反应式监听原本裸听整个 `~/.dsh/storages` 与 `~/.dsh/memory`。实测：`~/.dsh/storages/whale.json`
+> （**114 MB**，DeepTrace 插件的 store）被别的插件**每 30 秒重写一次**，`memory.db-wal` 亦持续写入
+> → 每 30 秒触发一次全量扫描+落盘：10 分钟精确窗口 **10 次写入**（9 次 whale + 1 次 wal）
+> = 1438 次/天、约 **1.66 GB/天**纯写放大，而两次扫描的条目 md5 **完全相同**（根本没变）。
+> **修法**：每个监听根加**文件名白名单**——`storages` 只认 `mcp_connector.json` / `dsh_automation.json`
+> （`lib/scanner.js:271` 与 `:334` 真正读的两个文件），`memory` 只认 `README.md` 与主题 markdown，
+> `plugins` 只认 `.yml/.yaml/.js/.mjs/.json`；拿不到文件名时仍放行（宁可多扫一次，不漏真实变更）。
+> 同版把供给文本（AGENTS 块 + `capability-lookup` 技能正文）统一改为**工具优先**。
+> 回归测试 T24–T27（含真实 `fs.watch` 行为级验证），全套 **33/33 绿**。
+
 
 自动扫描并维护 DSH 的能力清单（插件 / 技能 / 记忆 / 连接器 / 自动化 / CLI 工具 / **本机环境** / **硬件** / **软件**），
 按任务意图快速匹配能力及调用方式，能力缺失时给出针对性补足引导。
@@ -170,9 +182,8 @@ Web/RPC 面（`/capability-aware/query|list|scan|guide`）按最小赌注接入�
 ## 测试
 
 ```powershell
-npm test   # node --test test/ —— 29 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
-# 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件：
-node --test test/capability.test.mjs
+npm test   # node --test test/capability.test.mjs —— 33 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
+# 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件。
 ```
 
 覆盖：探针映射先验（≥1 命中才信整批）、落盘幂等、验收 A（匹配+调用方式）、
@@ -180,7 +191,9 @@ node --test test/capability.test.mjs
 v3 增补（MCP 真实结构探针/虚拟显卡排除/注册表解析噪声过滤/硬件软件检索与引导）、
 **v5 六缺陷回归 T15–T23**（`mergeManual` 别名存活 / 端到端灌别名→scan→存活 / disabled≠negative /
 `queryStrength` 真命中 vs 噪声榜首 / Bug4 idf 自愈 + 源码断言 / `entryKey` 同名不同源 /
-父子竞争让位 / 预置别名幂等且不覆盖用户别名 / 弱命中保留候选）。
+父子竞争让位 / 预置别名幂等且不覆盖用户别名 / 弱命中保留候选）、
+**v0.6.1 缺陷 #7 回归 T24–T27**（监听根 accept 白名单源码级断言 + 真实 `fs.watch` 行为级验证
+whale.json 被挡而 mcp_connector.json 放行 / 工具优先文案断言 / 版本戳一致）。
 
 ## 已知边界（未验证 / 待做）
 
@@ -193,3 +206,12 @@ v3 增补（MCP 真实结构探针/虚拟显卡排除/注册表解析噪声过�
   最坏情况是提示多余，不会丢候选。
 - 预置别名按条目 `name`（+可选 `type`）匹配；同名条目（如 `imagegen-frontend-web` 有两条）
   会同时命中，这是刻意的（同名即同能力语义）。
+- **v0.6.1 已修缺陷 #7（监听过宽 → 写放大）**：`~/.dsh/storages` 与 `~/.dsh/memory` 改为**文件名白名单**
+  监听。实测修复前 `~/.dsh/storages/whale.json`（114 MB，别的插件每 30 秒重写）会触发
+  1438 次/天扫描+落盘、约 1.66 GB/天纯写入，而清单条目 md5 根本没变。修复后噪声文件不再触发扫描；
+  代价是「拿不到文件名时仍放行」——宁可多扫一次，不可漏掉真实变更。
+- **仍未做（有意的权衡）**：`applyScan` 落盘守卫（条目指纹未变则跳过写盘）未实施——完全不写盘会让
+  `meta.lastScanAt` 老化并触发 `lib/doctor.js:29-38` 的 `STALE_SCAN`（warn，阈值 24h）误报，
+  需要「内容不变但仅刷新扫描时间」的轻量策略。白名单已消掉 90% 噪声，暂不引入这个复杂度。
+- 与本插件无关的顺带发现（未处理）：`~/.dsh/storages` 下有 23 个 `.*.tmp` 共约 722 MB，
+  内容为 `{"unit":{"name":"whale",...}}`，疑为 whale 插件原子写残留，**未删除**（删前须核实引用）。

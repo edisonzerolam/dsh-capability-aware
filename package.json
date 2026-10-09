@@ -1,6 +1,6 @@
 {
   "name": "dsh-capability-aware",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "DSH 自我能力感知插件：自动扫描维护能力清单（插件/技能/记忆/连接器/自动化/工具/本机环境/硬件/软件），快速检索匹配能力及调用方式，缺失给补足引导；装上即得（自供给 capability-lookup 技能）。",
   "type": "module",
   "main": "lib/index.js",
@@ -33,6 +33,6 @@
     }
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/capability.test.mjs"
   }
 }

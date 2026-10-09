@@ -858,3 +858,115 @@ test('v5 Bug3: 弱命中时保留候选并附缺失提示（附加式，不误�
     assert.ok(/匹配到|命中 \d+ 个接近候选/.test(out), '附加提示不得取代候选列表');
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════
+// v0.6.1 缺陷 #7 回归（监听过宽 → 写放大；源自运行体检取证）
+//   `~/.dsh/storages/whale.json`（114 MB，别的插件每 30 秒重写）与
+//   `~/.dsh/memory/memory.db-wal` 会把整个 storages/memory 根裸听变成
+//   1438 次/天、1.66 GB/天的纯写放大，而清单条目 md5 根本没变。
+// ════════════════════════════════════════════════════════════════════════
+
+// ── T24 (v0.6.1 Bug7) 源码级：监听根必须带文件名白名单 ────────────────
+test('v0.6.1 Bug7: 监听根带 accept 白名单，storages 只认两个探针文件', async () => {
+  const idx = await fs.promises.readFile(new URL('../lib/index.js', import.meta.url), 'utf8');
+  // storages 根必须声明 accept，且只认 scanner 真正读的两个文件
+  assert.ok(
+    /p:\s*path\.join\(home,\s*'storages'\)[\s\S]{0,200}?accept:\s*\/\^\(mcp_connector\|dsh_automation\)\\\.json\$\/i/.test(idx),
+    'storages 根必须以 /^(mcp_connector|dsh_automation)\\.json$/i 白名单收窄（旧实现裸听整个目录 → whale.json 每 30s 触发全量扫描）',
+  );
+  // memory 根必须有白名单，且排除 SQLite 边车
+  assert.ok(/MEMORY_WATCH_ACCEPT/.test(idx), 'memory 根必须使用 MEMORY_WATCH_ACCEPT 白名单');
+  const m = idx.match(/const MEMORY_WATCH_ACCEPT = (\/.*\/[a-z]*);/);
+  assert.ok(m, 'MEMORY_WATCH_ACCEPT 必须是一个正则字面量');
+  const re = eval(m[1]); // eslint-disable-line no-eval
+  assert.equal(re.test('README.md'), true, 'README.md 是 memory 探针的登记表，必须放行');
+  assert.equal(re.test('summary.md'), true, '主题 markdown 必须放行');
+  assert.equal(re.test('memory.db-wal'), false, 'memory.db-wal 持续写入，必须忽略（写放大主因之一）');
+  assert.equal(re.test('memory.db'), false, 'memory.db 必须忽略');
+  assert.equal(re.test('memory.db-shm'), false, 'memory.db-shm 必须忽略');
+  assert.equal(re.test('memory.json'), false, '非 markdown 探针输入应忽略');
+  // 白名单必须在 schedule 之前生效（return 掉，不进防抖）
+  const cb = idx.slice(idx.indexOf('fs.watch(r.p'));
+  assert.ok(
+    cb.indexOf('r.accept.test') < cb.indexOf('schedule('),
+    'accept 判断必须位于 schedule() 之前，否则等于没过滤',
+  );
+  // 拿不到文件名时仍须放行（宁可多扫一次，不可漏真实变更）
+  assert.ok(/if \(f && r\.accept && !r\.accept\.test/.test(idx), '无文件名（f 为空）时必须放行');
+});
+
+// ── T25 (v0.6.1 Bug7) 行为级：用真实 fs.watch 验证噪声被挡、真变更放行 ──
+test('v0.6.1 Bug7: 真实 fs.watch —— whale.json 不触发扫描，mcp_connector.json 触发', async () => {
+  const idx = await fs.promises.readFile(new URL('../lib/index.js', import.meta.url), 'utf8');
+  const m = idx.match(/accept:\s*(\/\^\(mcp_connector\|dsh_automation\)\\\.json\$\/i)/);
+  assert.ok(m, '取不到 storages 白名单正则');
+  const accept = eval(m[1]); // eslint-disable-line no-eval
+  assert.equal(accept.test('whale.json'), false, 'whale.json（114 MB，每 30s 重写）必须被挡');
+  assert.equal(accept.test('mcp_connector.json'), true, 'mcp_connector.json 是探针输入，必须放行');
+  assert.equal(accept.test('dsh_automation.json'), true, 'dsh_automation.json 是探针输入，必须放行');
+  assert.equal(accept.test('.*.tmp'), false, '.tmp 残留必须被挡');
+
+  // 真实文件系统行为：挂一个与实现同构的 watcher，写噪声文件不计数、写白名单文件计数
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-watch7-'));
+  const hits = [];
+  const w = fs.watch(tmp, { recursive: false, persistent: false }, (_ev, fname) => {
+    const f = fname ? String(fname) : '';
+    if (f && /\.(tmp|log|lock|swp)$/i.test(f)) return;
+    if (/\.bak|~$|\.tmp-/i.test(f)) return;
+    if (f && !accept.test(path.basename(f))) return;
+    hits.push(f);
+  });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    await fs.promises.writeFile(path.join(tmp, 'whale.json'), 'x'.repeat(64), 'utf8');
+    await wait(250);
+    await fs.promises.writeFile(path.join(tmp, 'memory.db-wal'), 'x', 'utf8');
+    await wait(250);
+    assert.deepEqual(hits, [], `噪声文件不得触发扫描（实际 ${JSON.stringify(hits)}）`);
+    await fs.promises.writeFile(path.join(tmp, 'mcp_connector.json'), '{"a":1}', 'utf8');
+    await wait(400);
+    assert.ok(hits.includes('mcp_connector.json'), '白名单文件变更必须触发扫描');
+  } finally {
+    try { w.close(); } catch {}
+    await fs.promises.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── T27 (v0.6.1) 工具优先：供给文本必须把 capability_query 摆在 CLI 之前 ──
+test('v0.6.1: AGENTS 块与技能正文均「工具优先」（capability_query 先于 cap.mjs）', async () => {
+  const { skillBody, provisionAgentsPointer, provisionSkill } = await import(modUrl(path.join(root, 'lib', 'provision.js')));
+  const body = skillBody('9.9.9', 'D:/pd');
+  const tq = body.indexOf('capability_query');
+  const tc = body.indexOf('cap.mjs');
+  assert.ok(tq > -1, '技能正文必须提到 capability_query 工具');
+  assert.ok(tq < tc, `技能正文须工具优先（capability_query@${tq} 应早于 cap.mjs@${tc}）`);
+  assert.ok(/首选/.test(body), '技能正文须标注「首选」');
+  assert.ok(/兜底/.test(body), '技能正文须保留 CLI 兜底入口');
+
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-toolfirst-'));
+  try {
+    const home = path.join(tmp, 'dsh');
+    provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    const t = await fs.promises.readFile(path.join(home, 'AGENTS.md'), 'utf8');
+    const aq = t.indexOf('capability_query');
+    const ac = t.indexOf('cap.mjs');
+    assert.ok(aq > -1, 'AGENTS 块必须提到 capability_query 工具');
+    assert.ok(aq < ac, `AGENTS 块须工具优先（capability_query@${aq} 应早于 cap.mjs@${ac}）`);
+    assert.ok(/缺失|补足建议/.test(t), 'AGENTS 块须说明弱命中/缺失引导');
+    // 幂等性与既有契约不回归
+    const r2 = provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    assert.equal(r2.action, 'unchanged');
+    const s1 = provisionSkill({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    assert.equal(s1.action, 'created');
+    assert.equal(provisionSkill({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home }).action, 'unchanged');
+  } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
+});
+
+// ── T26 (v0.6.1 Bug7) 版本与记账：0.6.1 版本戳一致 ────────────────────
+test('v0.6.1: PLUGIN_VERSION 与 package.json 版本一致', async () => {
+  const idx = await fs.promises.readFile(new URL('../lib/index.js', import.meta.url), 'utf8');
+  const pkg = JSON.parse(await fs.promises.readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const v = (idx.match(/PLUGIN_VERSION = '([^']+)'/) || [])[1];
+  assert.ok(v, '取不到 PLUGIN_VERSION');
+  assert.equal(v, pkg.version, `PLUGIN_VERSION(${v}) 必须等于 package.json(${pkg.version})`);
+});
