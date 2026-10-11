@@ -1025,6 +1025,35 @@ test('v0.7.0: mountPromptSection 经 ctx.inject 软注入并注册 section', asy
   const off = mountPromptSection(fakeCtx, { enabled: false });
   assert.equal(off.mounted, false);
   assert.equal(off.reason, 'disabled');
+
+  // ⚠ 防回归（2026-10-11 实测踩坑）：宿主 ctx.inject 的回调**不是同步触发**的。
+  // 若实现写成「回调里 result = {...} 重新赋值」或「末尾乐观 return {mounted:true}」，
+  // 前者永远停在 pending、后者谎报成功。契约必须是：返回**同一引用**，回调内原地改属性。
+  const lateSections = [];
+  let lateCb = null;
+  const asyncCtx = {
+    inject(services, cb) { lateCb = cb; },
+  };
+  const ar = mountPromptSection(asyncCtx, { version: '9.9.9', log() {}, warn() {} });
+  assert.equal(ar.mounted, false, '回调未触发前不得谎报成功');
+  assert.equal(ar.reason, 'pending');
+  assert.equal(ar.diag.injectCalled, 0, 'diag 应显示回调尚未触发');
+  lateCb({
+    systemPrompt: { section(s) { lateSections.push(s); return () => {}; }, getSectionOrder: () => 3000 },
+    effect(fn) { fn(); },
+  });
+  assert.equal(ar.mounted, true, '回调触发后，调用方持有的**同一引用**必须变为已挂载（原地改属性）');
+  assert.equal(ar.order, 2950);
+  assert.equal(ar.reason, undefined, '挂载成功后应清掉 pending 原因');
+  assert.equal(ar.diag.injectCalled, 1);
+  assert.equal(ar.diag.sawService, true);
+  assert.equal(lateSections.length, 1);
+
+  // 无 systemPrompt 服务时必须如实降级，不得乐观返回成功
+  const bare = { inject(services, cb) { cb({ systemPrompt: undefined }); } };
+  const br = mountPromptSection(bare, { warn() {} });
+  assert.equal(br.mounted, false);
+  assert.equal(br.reason, 'no-systemPrompt');
 });
 
 // T30 源码级防回归 + 接线：index.js 必须真的调用它，且默认开启

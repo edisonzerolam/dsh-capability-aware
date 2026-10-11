@@ -117,11 +117,20 @@
 ## 安装与启用
 
 ```powershell
-# 装进 desktop profile（本机 profile 名；装完需重启 DSH——插件在启动时刻判定，不热生效）
+# 装进 desktop profile（本机 profile 名）
 dsh plugin --profile desktop add "file:D:/Agent/CodeLib/dsh-capability-aware"
-# 然后重启 DSH。启动后 3 秒（scanDelayMs）自动完成首次全量扫描，
+# 首次安装即刻生效（宿主监听 profile 变更并立即重新 apply，实测装完 4 秒 apply() 已运行），
+# 不必重启。启动后 3 秒（scanDelayMs）自动完成首次全量扫描，
 # 清单落盘：~/.dsh/data/capability-aware/capabilities.json
 ```
+
+> **⚠ 生效时机（2026-10-11 实测修正，此前 README 的「必须重启」说法有误）**
+>
+> - **首次安装**：宿主监听 profile 变更后**立即重新 apply**，无需重启。
+> - **更新已装插件的代码**：`remove` + `add` 只刷新磁盘副本并重新 apply，**跑不了新代码**。模块走 `import()`，Node 的 ESM 缓存按解析后的 URL 键控，**同一路径在进程内只求值一次**。
+> - 实测（MARKER 实验）：把版本改成 `0.7.1-MARKER` 并重装，安装副本磁盘上确为 MARKER、`uptimeMs` 归零证明重新 apply 了，但活体仍报旧版本号 —— 跑的是首次加载时缓存的模块。
+> - 所以**换新代码必须重启 DSH Desktop**（托盘菜单「重启」，或 `POST /api/desktop/restart`）。
+> - 判断活体到底在跑哪一版：看 `~/.dsh/skills/capability-lookup/SKILL.md` 的版本戳（幂等写，内容变才刷新），或 `GET /api/capability-aware/doctor`。
 
 > 建议先在隔离 profile 验证（不碰主 profile、不占端口）：
 > `dsh plugin --profile cap-probe add "file:D:/Agent/CodeLib/dsh-capability-aware"` →
