@@ -1,6 +1,6 @@
 # dsh-efficiency bundle 层 —— DSH 效率机（能力索引 + 资源监控 + 错误账本 + 分级诊断）。
 #
-# build: 2026-10-11-v0.9.0-efficiency-2
+# build: 2026-10-11-v0.9.0-efficiency-3
 #
 # ⚠ 这行的真实作用（**已实测纠正，此前注释不准**）：
 #   动它会触发 DSH 的 `patchReload: live` —— 但那只**重新 apply**，跑的是
@@ -66,7 +66,7 @@
 #        dir: 监控数据目录覆盖（默认 <dshHome>/data/efficiency/monitor）
 #  diagnose: v0.9.0 分级诊断与修复提示词（默认 true）。
 #      P0 宿主/加载器确定的失败｜P1 本机可修且证据充分｜P2 需推断或影响面小｜
-#      P3 **不是本机该修的**（供应商限流/配额/断流/网络，实测占全部错误近一半）。
+#      P3 **不是本机该修的**（供应商限流/配额/断流/网络，实测占全部错误四成）。
 #      fixprompt 生成的提示词只含 P0–P2，P3 单独标注「不要修」。
 - insert:
     - id: dsh-efficiency

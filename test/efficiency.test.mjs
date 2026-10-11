@@ -115,7 +115,7 @@ test('M4: 加载器/宿主契约失败分到 P0（宿主自己报的确定失败
   }
 });
 
-test('M4: 供应商类错误分到 P3 —— 实测占全量错误近一半，绝不能让 agent 去「修」限流', () => {
+test('M4: 供应商类错误分到 P3 —— 实测占全量错误四成，绝不能让 agent 去「修」限流', () => {
   for (const code of ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'QUOTA_EXCEEDED', 'AUTH']) {
     assert.equal(SEVERITY_RULES[code].severity, 'P3', `${code} 应为 P3`);
     assert.equal(SEVERITIES.P3.fixable, false);
@@ -1013,7 +1013,7 @@ test('M5: 正文含三段各自的问题、CLI 入口与分档语义', () => {
 test('M5: 正文显式警告「P3 一律不要动」并解释理由（防止 agent 去修供应商限流）', () => {
   const t = effSection.efficiencySectionText('1.0.0');
   assert.ok(t.includes('P3 一律不要动'));
-  assert.ok(t.includes('占全部错误的近一半'));
+  assert.ok(t.includes('占全部错误的四成'));
   assert.ok(t.includes('改本机代码对它们无效'));
 });
 
@@ -1353,3 +1353,40 @@ test('M1：保留名单用的是**条目 type 名**，不是探针名（interfac
   const light = src.match(/const LIGHT_PROBES = \[([^\]]*)\]/);
   assert.ok(light && /'interfaces'/.test(light[1]), '轻扫探针集应含 interfaces（探针名，复数）');
 });
+
+test('M2 回归：自证开销只量「采集自己」——不得把宿主 CPU 冒领成采集自耗', async () => {
+  // 真机事故（2026-10-11，重启后自证发现）：`selfMsAvg=1095.2ms` /
+  // `selfCpuPctApprox=36.507%` / `SELF_COST_HIGH` 恒亮 —— 而那是**整个 Host 进程**
+  // 的 CPU。tick 里含 `await sleep(500ms)`，窗口内宿主自己在跑 agent loop，全被记到采集器头上。
+  // 恒亮的假告警等于训练人忽略告警，比没有告警更糟，故用两层锁死。
+
+  // ① 结构层：`sampleAll` 必须把两段 FFI 采样的 CPU 分开量、把 sleep 窗口排除在外。
+  const psrc = fs.readFileSync(path.join(root, 'lib', 'monitor', 'procs.js'), 'utf8');
+  assert.ok(/selfCpuMs/.test(psrc), 'sampleAll 必须返回 selfCpuMs');
+  const body = psrc.slice(psrc.indexOf('export async function sampleAll'));
+  const iSleep = body.indexOf('await new Promise');
+  const iCpuA = body.indexOf('process.cpuUsage(cpuA0)');
+  const iCpuB0 = body.indexOf('process.cpuUsage(cpuB0)');
+  assert.ok(iCpuA > 0 && iCpuB0 > iSleep,
+    '两段 CPU 快照必须夹住 sleep：第一段量完才 sleep，sleep 之后才开第二段');
+  assert.ok(iCpuA < iSleep, 'cpuA 必须在 sleep 之前结算（否则会把睡眠窗口算进来）');
+
+  // ② 组装层：collector 的 selfMs 必须来自 procs.selfCpuMs + 同步块，而不是整进程差值；
+  //    整进程差值只能作为对照量另存（hostCpuMs），且必须显式标注它不等于采集开销。
+  const csrc = fs.readFileSync(path.join(root, 'lib', 'monitor', 'collector.js'), 'utf8');
+  assert.ok(/procs\.selfCpuMs/.test(csrc), 'selfMs 必须用 procs.selfCpuMs');
+  assert.ok(/hostCpuMs/.test(csrc), '整进程 CPU 必须另存为 hostCpuMs（供对照，不冒充自耗）');
+  assert.ok(/const selfMs = \(Number\(procs\.selfCpuMs\)/.test(csrc),
+    'selfMs 必须以 procs.selfCpuMs 为首项');
+  assert.ok(!/const selfMs = \(cpuUs\.user/.test(csrc), '不得再用整进程差值当 selfMs（旧缺陷写法）');
+
+  // ③ 行为层：本地跑一次真实的 sampleAll —— selfCpuMs 必须是数字，且远小于 wallMs
+  //    （wallMs 含 500ms sleep；若自耗把 sleep 算进去，两者会同量级）。
+  const s = await procs.sampleAll({ intervalMs: 200 });
+  assert.equal(typeof s.selfCpuMs, 'number', 'selfCpuMs 必须是数字');
+  assert.ok(s.selfCpuMs >= 0);
+  assert.ok(s.wallMs >= 200, `wallMs 应包含 sleep 窗口，实际 ${s.wallMs}`);
+  assert.ok(s.selfCpuMs < s.wallMs, 'selfCpuMs 必须显著小于 wallMs（说明 sleep 窗口未进账）');
+  assert.ok(s.selfCpuMs < 150, `自耗应远低于 SELF_COST_HIGH 触发线 150ms，实际 ${s.selfCpuMs}`);
+});
+

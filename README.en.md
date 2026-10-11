@@ -32,7 +32,7 @@ with monitor events into a **versioned diagnostic envelope**
 **certainty, not severity**: **P0** the host/loader itself reported it · **P1** locally fixable with
 sufficient evidence · **P2** needs inference or low impact · **P3 not this machine's to fix**
 (provider rate limits / quota / transport / network). On a real 13 303-record ledger: 151 findings
-`{P0:1, P1:21, P2:104, P3:25}`, `fixable=126`; **provider-class errors are 45.6% of all records**
+`{P0:1, P1:21, P2:104, P3:25}`, `fixable=126`; **provider-class errors are 40.6% of all records**
 (RATE_LIMIT 2794 + SERVER 1115 + TIMEOUT 402 + TRANSPORT 283 …) — which is exactly why P3 exists.
 `lib/fixprompt.js` produces a prompt you can paste into a fresh session (with an "identify yourself first"
 preamble so it isn't applied to the **wrong** DSH instance), and **only generates text — it never
