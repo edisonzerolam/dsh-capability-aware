@@ -470,3 +470,25 @@ AGENTS 指针仍默认关闭）、
   `sampleAll()` 退化为 `source:'self-only'`，只报 Host 自己并附 `note`（**不假装拿到全机数据**）。
 - **`SESSION_STALL` 是六条规则里最弱的一条**（唯一基于推断而非测量），阈值刻意保守（默认连续 5 个周期），
   宁可漏报。若实测发现误报，先调 `detect.stallTicks` 而不是删规则。
+
+### 2026-10-11 设置页实测后收紧的六项（D1–D6）
+
+老板在设置页看到「中间一大片空白」「CPU 209.4%」并追问后逐项取证，结论与改动：
+
+| # | 现象 | 根因（行号级） | 改动 |
+|---|---|---|---|
+| D1 | 标题与「概览」之间约 500px 空白 | `lib/client.js` 的 `S.intro` 带 `flex: '1 1 320px'`，而 intro 是 `S.wrap`（`flexDirection:'column'`）的**直接子元素** —— 纵向 flex 里 `flex-basis` 量的是**高度**，`grow:1` 再吃光剩余纵向空间 | 删掉 `flex`；测试锁死「intro 不得带 flex」+「全树不得再有 320px 基高写法」 |
+| D2 | 表头写 `CPU%` 却出现 `209.4%` | 数是对的、标签骗人：`cpuPct` 口径是「100% = 占满 **1 个逻辑核**」，12 核机上 209% = 2.09 核 ≈ 整机 17.4%。独立复测（.NET `Process.TotalProcessorTime`，不走 koffi 路径）得 140.7%，同刻插件报 139.62%，差 0.8pp | `/monitor/procs` 响应新增 `cpuBasis` 字段，由页面原样上屏 |
+| D3 | 「错误账本·记录」「坏行」长期显示 `—` | 客户端读的是 `/ledger/stats`，该路由只回**本次运行**的计数器（`captured/written/pending/dedup…`），**没有 `total`、没有 `badLines`**；累计真值在 `/ledger/recent`（`readTail` → `{total, badLines, records}`） | 取数改走 `/ledger/recent?limit=1` |
+| D4 | 设置页自己就是负载 | `/monitor/procs` 每次请求都 `await sampleAll()` **重采一遍全机**，而采集器本已每 3s 采一次。实测一轮完整刷新 1313ms Host CPU / 806ms 墙钟 = **单核 162.9%**；5 秒间隔 ⇒ 常驻单核 26.3% | 采集器缓存最近一次采样（`lastSample()`），路由默认返回缓存（`?fresh=1` 强制重采），页面间隔 5s→15s |
+| D5 | `PROCESS_GONE` 占全部事件 49.2% | 注释一直写「只报曾经稳定存在的」，代码却只做「上轮在、本轮不在」—— Windows 短命工具子进程的正常退出被当异常，平均每 12 秒一条 | 加 `goneMinTicks`（默认 3）连续存在门限；**severity 由 P1 降为 P2**（退出码无从读取 ⇒ 不能判定崩溃） |
+| D6 | `SESSION_STALL` 占 45.6% | 原判据 `steps>0 && 无增量` 把**已结束/空闲**会话当停摆，9 个会话各被反复报约 70 次 | 只认「事件仍在流（`asOfSeq` 推进）但 `llmMs/toolMs` 零增长」；冻结的会话天然跳过 |
+
+> ⚠ D6 的关键限制是**源码级事实**，不是实现偷懒：`lib/monitor/sessions.js` 的行投影
+> **没有「已结束/活跃」标志**，已结束会话与停摆会话在投影里都是「`asOfSeq` 冻结 + 时间不增」，
+> **无法区分**。所以只能退到「事件是否还在流」这一个可观测信号——这是判据的上限。
+
+> 噪声实测基线（收紧前，2.67 小时 / 1631 条）：`PROCESS_GONE` 803（49.2%）、
+> `SESSION_STALL` 744（45.6%）、`IO_STORM` 57、`MEMORY_GROWTH` 19、`HOT_PROCESS` 8
+> —— **九成四是噪声**，且都是「恒亮的假告警」：按「宁可漏报不可误报」的纪律，
+> 训练人忽略告警比没有告警更糟，故两条都收紧。

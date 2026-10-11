@@ -1,6 +1,20 @@
 # dsh-efficiency bundle 层 —— DSH 效率机（能力索引 + 资源监控 + 错误账本 + 分级诊断）。
 #
-# build: 2026-10-11-v0.10.0-efficiency-1（+ 设置页客户端半边 lib/client.js）
+# build: 2026-10-11-v0.10.1-efficiency-1（设置页实测六项修复 D1–D6）
+#
+# v0.10.1（设置页实测后收紧）：老板在设置页看到「中间一大片空白」「CPU 209.4%」并
+# 要求全量核验，逐项取证后修了六处 ——
+#   D1 空白：client.js 的 S.intro 带 `flex:'1 1 320px'`，而它是纵向 flex 容器的直接
+#      子元素 ⇒ flex-basis 量的是**高度**、grow:1 再吃光剩余空间 ⇒ 顶出 500+px 空盒。
+#   D2 CPU 口径：cpuPct 是「100% = 占满 1 个逻辑核」，12 核机上 209% 看着像 209%
+#      其实只有 2.09 核。数是对的、标签骗人 ⇒ /procs 新增 cpuBasis 字段并由页面原样上屏。
+#   D3 两个 `—`：页面读的 /ledger/stats 只回「本次运行」计数器，**无 total/badLines**；
+#      累计真值在 /ledger/recent ⇒ 取数改走 /recent?limit=1。
+#   D4 自造负载：/monitor/procs 每次请求都重采全机（采集器本已每 3s 采一次），实测一轮
+#      刷新 1313ms Host CPU = 单核 162.9% ⇒ 加缓存路径（?fresh=1 可强制重采）+ 页面 15s。
+#   D5/D6 噪声：实测 2.67h 产出 1631 条事件，其中 PROCESS_GONE 803(49.2%)、
+#      SESSION_STALL 744(45.6%) —— 九成四是「恒亮的假告警」。前者加「曾经稳定存在」
+#      门限并降为 P2；后者只认「事件仍在流(asOfSeq 推进)但 LLM/工具时间零增长」。
 #
 # 客户端半边（v0.10.0 新增）：`lib/client.js` 把「效率机」注册成
 # DSH 设置页里**独立的一项**（`settings.section` 是 list 槽，导航按 order 生成）。

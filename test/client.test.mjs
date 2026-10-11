@@ -139,14 +139,16 @@ const FIXTURES = {
     healthy: true, state: 'ok', entries: 762,
     counts: { skill: 351, plugin: 10, interface: 174 }
   },
-  '/api/efficiency/ledger/stats': { total: 15768, badLines: 0 },
+  '/api/efficiency/ledger/recent?limit=1': { total: 15768, badLines: 0, records: [] },
   '/api/efficiency/monitor/health': { healthy: true, stats: { ticks: 955, errors: 0, samplesWritten: 955 } },
   '/api/efficiency/monitor/procs': {
     source: 'ffi', cores: 12, wallMs: 504, totalWorkingSetMB: 5801,
+    cached: true, sampleAgeMs: 4200,
     procs: [
       { pid: 42256, kind: 'host', cpuPct: 143.75, workingSetMB: 1981, name: 'DSH Desktop.exe' },
       { pid: 20412, kind: 'utility', cpuPct: 2.5, workingSetMB: 120.4, name: 'node.exe' }
     ],
+    cpuBasis: 'CPUBASIS_SENTINEL',
     disclaimer: 'DISCLAIMER_SENTINEL'
   },
   '/api/efficiency/diagnose': {
@@ -205,11 +207,75 @@ test('客户端页面：取数走 5 条只读路由，并把后端原样的数�
     assert.match(text, /DSH Desktop\.exe/, '映像名必须上屏')
     assert.match(text, /143\.8%/, 'CPU% 必须按一位小数上屏')
     assert.match(text, /1,981 MB|1981 MB/, '工作集必须上屏')
+    // CPU 口径必须上屏：cpuPct 是「100% = 占满 1 个逻辑核」，12 核机上 143.8%
+    // 看着像 143% 其实只有 1.44 核。不带口径的数字会骗人（老板原话：「208% 是什么鬼」）。
+    assert.match(text, /CPUBASIS_SENTINEL/, 'CPU 口径说明必须原样上屏（否则数字会骗人）')
+    // 缓存路径必须自证：数据取自最近一次心跳采样，而不是点一次刷新就重采一遍全机
+    assert.match(text, /最近一次心跳采样/, '必须标明数据取自缓存采样')
+    assert.match(text, /4 秒前|4秒前/, '必须标明采样距今多久')
     assert.match(text, /DISCLAIMER_SENTINEL/, '后端免责说明必须原样上屏（不得吞掉）')
     // 诊断：分档 + 可修/不可修 + 条目
     assert.match(text, /PLUGIN_FAILED/, 'finding code 必须上屏')
     assert.match(text, /plugin:demo/, 'finding 主体必须上屏')
     assert.match(text, /P3/, 'P3 档位必须可见')
+  } finally {
+    globalThis.fetch = realFetch
+    globalThis.setInterval = realSetInterval
+    globalThis.clearInterval = realClearInterval
+  }
+})
+
+test('客户端页面：intro 不得带纵向 flex，且轮询间隔必须是 15 秒', async () => {
+  const def = await loadBundle()
+  const mod = def.factory(() => ReactShim)
+  const { ctx, getReg } = makeCtx()
+  mod.apply(ctx)
+
+  const realFetch = globalThis.fetch
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  const intervals = []
+  globalThis.fetch = async (url) => ({ ok: true, status: 200, json: async () => FIXTURES[url] })
+  globalThis.setInterval = (fn, ms) => { intervals.push(ms); return 0 }
+  globalThis.clearInterval = () => {}
+
+  try {
+    store = []
+    renderText(getReg().comp, { t: (k) => k })
+    for (const fn of effects) fn()
+    await new Promise((r) => setTimeout(r, 0))
+
+    // 收集「纯文本 → style」对（flatten 会丢掉 style，这里自己走一遍树）
+    const pairs = []
+    const walk = (node) => {
+      if (node === null || node === undefined || typeof node === 'boolean') return
+      if (typeof node === 'string' || typeof node === 'number') return
+      if (Array.isArray(node)) { for (const n of node) walk(n); return }
+      if (typeof node === 'object' && 'type' in node) {
+        const props = node.props || {}
+        if (typeof node.type === 'function') { walk(node.type(props)); return }
+        const kids = props.children
+        const text = typeof kids === 'string'
+          ? kids
+          : (Array.isArray(kids) ? kids.filter((c) => typeof c === 'string').join('') : '')
+        if (text) pairs.push({ text, style: props.style || {} })
+        walk(kids)
+      }
+    }
+    walk(getReg().comp({ t: (k) => k }))
+
+    // 副标题：locale 走 makeCtx 注册的真实词典，故文本是中文而不是 key
+    const intro = pairs.find((p) => /本机能力索引|Local capability index/.test(p.text))
+    assert.ok(intro, `必须渲染出副标题，实际文本节点：${JSON.stringify(pairs.map((p) => p.text).slice(0, 12))}`)
+    // intro 是 S.wrap（flexDirection:'column'）的直接子元素：纵向 flex 里 flex-basis
+    // 量的是**高度**，grow:1 再吃光剩余纵向空间 ⇒ 顶出 500+px 空盒。绝不能加回 flex。
+    assert.equal(intro.style.flex, undefined, 'intro 不能带 flex —— 会顶出一个大空盒')
+    // 全树兜底：任何节点都不许再出现 `flex: '1 1 320px'` 这种纵向基高写法
+    const bad = pairs.filter((p) => typeof p.style.flex === 'string' && p.style.flex.includes('320px'))
+    assert.deepEqual(bad.map((p) => p.text), [], '不得再有纵向 flex-basis 写法')
+
+    // 轮询间隔放宽到 15 秒（原 5 秒：一轮完整刷新 1313ms Host CPU ⇒ 常驻单核 26.3%）
+    assert.ok(intervals.includes(15000), `自动刷新间隔必须是 15000ms，实际 ${JSON.stringify(intervals)}`)
   } finally {
     globalThis.fetch = realFetch
     globalThis.setInterval = realSetInterval

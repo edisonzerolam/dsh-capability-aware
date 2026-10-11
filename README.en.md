@@ -152,10 +152,22 @@ Data lives under `~/.dsh/data/efficiency/` — `capabilities.json`, `ledger/` (`
 
 ## Verified on a real machine
 
-- **199/199 unit tests green** (`npm test` → `node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs`; 44 + 55 + 100)
-- Real inventory: **549 entries** — skill 366 · software 109 · env 27 · memory 16 · plugin 10 · automation 8 · hardware 7 · tool 5 · mcp 1
-  (plus **174** interface entries from the v0.9.0 surface)
-- Live host evidence: boot scan, **reactive watcher** (`reason="mcp/automation change (whale.json)"`), **20-min periodic** scans, real `session/event` error capture, a **13 303-record** ledger backfilled from 1.2 GB of session logs in 22.7 s, and a **0.000% self-cost** heartbeat measured in-process
+- **216/216 unit tests green** (`npm test` → `node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs test/client.test.mjs`)
+- Real inventory: **763 entries** — skill 351 · software 109 · env 81 · memory 16 · plugin 10 · automation 9 · hardware 7 · tool 5 · mcp 1
+  (plus **174** interface entries)
+- Live host evidence: boot scan, **reactive watcher**, **20-min periodic** scans, real `session/event` error capture,
+  a **16 428-record** ledger backfilled from 1.2 GB of session logs, and a **0.21% self-cost** heartbeat measured in-process
+- A **settings page** ("DSH 效率机") shipped in v0.10.0 as a client half (`lib/client.js`) registering into the
+  `settings.section` slot — live process table, inventory overview, graded diagnostics, fix-prompt generation
+- **Nine real-machine defects found and fixed** — three by live RPC probes before release
+  (Cordis service access throwing, the light scan wiping interface entries, self-cost mis-attributing host CPU),
+  three from the settings page (a 500px flex gap, an unlabelled CPU basis, ledger totals read from the wrong route),
+  and three more from the same review (the page re-sampling the whole machine on every poll, plus the two
+  noise rules below)
+- **Two noise rules tightened** after measuring **1631 events over 2.67 h, of which 94% were noise**:
+  `PROCESS_GONE` now requires a PID to have been stable for `goneMinTicks` cycles (and drops to P2, since the exit
+  code is unreadable), and `SESSION_STALL` only fires when a session is still emitting events (`asOfSeq` advancing)
+  yet shows zero LLM/tool time growth
 - No secrets, no absolute personal paths in the shipped files
 
 ## License

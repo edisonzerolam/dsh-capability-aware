@@ -124,7 +124,9 @@ test('M4: 供应商类错误分到 P3 —— 实测占全量错误四成，绝�
 
 test('M4: 监控事件码单独一张表（判据不同：测量值 vs 宿主报错）', () => {
   assert.equal(MONITOR_SEVERITY.PLUGIN_FAILED, 'P0');
-  assert.equal(MONITOR_SEVERITY.PROCESS_GONE, 'P1');
+  // 进程消失：进程不在了是确定的，但**退出码无从读取** ⇒ 无法判定是崩溃还是正常
+  // 退出 ⇒ 按「分档看确定性」只能归 P2（2026-10-11 由 P1 降级）。
+  assert.equal(MONITOR_SEVERITY.PROCESS_GONE, 'P2');
   assert.equal(MONITOR_SEVERITY.HOT_PROCESS, 'P1');
   assert.equal(MONITOR_SEVERITY.MEMORY_GROWTH, 'P1');
   assert.equal(MONITOR_SEVERITY.IO_STORM, 'P2');
@@ -132,6 +134,29 @@ test('M4: 监控事件码单独一张表（判据不同：测量值 vs 宿主报
   assert.equal(MONITOR_SEVERITY.SESSION_STALL, 'P2');
   // 两张表必须是不同的对象（混用会把监控语义套到错误码上）。
   assert.notEqual(SEVERITY_RULES, MONITOR_SEVERITY);
+});
+
+test('M4: detect.js 实际发出的 severity 必须与 MONITOR_SEVERITY 一致（两处曾各说各话）', () => {
+  // 2026-10-11：detect.js 把 PROCESS_GONE 降为 P2，diagnose.js 的表还是 P1 —— 同一件事
+  // 两张表各说各话，页面按哪张算都有一半是错的。这里用真实运行把两处钉在一起。
+  const det = detect.createDetector({ goneMinTicks: 1, stallTicks: 1, cooldownMs: 0 });
+  const seen = new Map();
+  const note = (evs) => { for (const e of evs) seen.set(e.code, e.severity); };
+
+  det.run({ now: 1000, procs: { source: 'ffi', rows: [{ pid: 5, cpuPct: 1 }] } });
+  note(det.run({ now: 1100, procs: { source: 'ffi', rows: [] } }));  // PROCESS_GONE
+  const flat = (seq) => ({ id: 's', steps: 1, asOfSeq: seq, dLlmMs: 0, dToolMs: 0, dSteps: 0, llmMs: 1, toolMs: 1 });
+  det.run({ now: 1200, sessions: { sessions: [flat(1)] } });
+  note(det.run({ now: 1300, sessions: { sessions: [flat(2)] } }));  // SESSION_STALL
+
+  assert.deepEqual([...seen.keys()].sort(), ['PROCESS_GONE', 'SESSION_STALL']);
+  for (const [code, sev] of seen) {
+    assert.equal(MONITOR_SEVERITY[code], sev, `${code}：detect.js 发 ${sev}，diagnose 表里是 ${MONITOR_SEVERITY[code]}`);
+  }
+  // 每个 detect 会发的码都必须在表里有档位（缺档会被兜底成 P2，静默丢语义）
+  for (const code of Object.keys(detect.REASONS)) {
+    assert.ok(MONITOR_SEVERITY[code], `${code} 在 MONITOR_SEVERITY 里没有档位`);
+  }
 });
 
 test('M4: minCount 阈值生效 —— 出现次数不足的噪声被滤掉', () => {
@@ -424,20 +449,34 @@ test('M3: PLUGIN_FAILED 不误报 active 插件', () => {
   assert.equal(ev.length, 0);
 });
 
-test('M3: PROCESS_GONE 只在 source=ffi 时判定（self-only 模式没有全机基线）', () => {
-  const det = detect.createDetector();
-  // 先建立基线（含 pid 42）
+test('M3: PROCESS_GONE 只在 source=ffi、且该 pid 曾连续稳定存在 ≥goneMinTicks 周期时才判定', () => {
+  const det = detect.createDetector({ goneMinTicks: 3 });
+  // 连续 3 个 ffi 周期都见到 pid 42 ⇒ 达到「曾经稳定存在」门限
   det.run({ now: 1000, procs: { source: 'ffi', rows: [{ pid: 42, cpuPct: 1 }] } });
-  // self-only 模式下 pid 42 缺席 → 不得报
-  const noFfi = det.run({ now: 2000, procs: { source: 'self-only', rows: [] } });
+  det.run({ now: 2000, procs: { source: 'ffi', rows: [{ pid: 42, cpuPct: 1 }] } });
+  det.run({ now: 3000, procs: { source: 'ffi', rows: [{ pid: 42, cpuPct: 1 }] } });
+  // self-only 模式下 pid 42 缺席 → 不得报（self-only 没有全机基线，且此路径不判消失）
+  const noFfi = det.run({ now: 4000, procs: { source: 'self-only', rows: [] } });
   assert.equal(noFfi.filter((e) => e.code === 'PROCESS_GONE').length, 0);
   // ffi 模式下缺席 → 报
-  const withFfi = det.run({ now: 3000, procs: { source: 'ffi', rows: [] } });
+  const withFfi = det.run({ now: 5000, procs: { source: 'ffi', rows: [] } });
   const gone = withFfi.filter((e) => e.code === 'PROCESS_GONE');
   assert.equal(gone.length, 1);
   assert.equal(gone[0].subject, 'pid:42');
-  assert.equal(gone[0].severity, 'P1');
-  assert.equal(gone[0].evidence.basis, 'pid-disappeared');
+  // 降为 P2：进程已不在，**退出码无从读取**，无法判定是崩溃还是正常退出
+  assert.equal(gone[0].severity, 'P2');
+  assert.equal(gone[0].evidence.basis, 'stable-pid-disappeared');
+  assert.equal(gone[0].evidence.seenTicks, 3);
+  assert.ok(gone[0].reason.includes('不判定为崩溃'), '原因文案必须自证「不判定为崩溃」');
+});
+
+test('M3: PROCESS_GONE 短命进程（存在不足 goneMinTicks 周期）不报 —— 实测 49.2% 噪声的源头', () => {
+  const det = detect.createDetector({ goneMinTicks: 3 });
+  det.run({ now: 1000, procs: { source: 'ffi', rows: [{ pid: 9, cpuPct: 1 }] } });
+  det.run({ now: 2000, procs: { source: 'ffi', rows: [{ pid: 9, cpuPct: 1 }] } });
+  // 只出现 2 个周期就消失（工具子进程的正常退出）→ 不报
+  const e = det.run({ now: 3000, procs: { source: 'ffi', rows: [] } });
+  assert.equal(e.filter((x) => x.code === 'PROCESS_GONE').length, 0);
 });
 
 test('M3: HOT_PROCESS 要求连续 N 次，单次尖峰不算（宁可漏报不可误报）', () => {
@@ -537,35 +576,57 @@ test('M3: IO 计数回绕/负增量不报（进程被复用）', () => {
   assert.equal(e.filter((x) => x.code === 'IO_STORM').length, 0);
 });
 
-test('M3: SESSION_STALL 连续 N 周期无时间增量且有未结束 step 才报（推断，最弱）', () => {
+test('M3: SESSION_STALL 只在「事件仍在流（asOfSeq 推进）但时间零增长」时报（推断，最弱）', () => {
   const det = detect.createDetector({ stallTicks: 3 });
-  const s = { id: 'sess-1', title: 'T', steps: 4, dLlmMs: 0, dToolMs: 0, dSteps: 0, llmMs: 10, toolMs: 5 };
+  // asOfSeq 每周期都在推进（会话仍在产生事件），但 llm/tool/step 增量为 0
+  const mk = (i) => ({
+    id: 'sess-1', title: 'T', steps: 4, asOfSeq: 100 + i,
+    dLlmMs: 0, dToolMs: 0, dSteps: 0, llmMs: 10, toolMs: 5,
+  });
   const runs = [];
-  for (let i = 0; i < 3; i += 1) runs.push(det.run({ now: 1000 * (i + 1), sessions: { sessions: [s] } }));
-  assert.equal(runs[0].filter((e) => e.code === 'SESSION_STALL').length, 0);
+  for (let i = 0; i < 4; i += 1) runs.push(det.run({ now: 1000 * (i + 1), sessions: { sessions: [mk(i)] } }));
+  assert.equal(runs[0].filter((e) => e.code === 'SESSION_STALL').length, 0, '第 1 周期无前值，不算');
   assert.equal(runs[1].filter((e) => e.code === 'SESSION_STALL').length, 0);
-  const hit = runs[2].filter((e) => e.code === 'SESSION_STALL');
+  assert.equal(runs[2].filter((e) => e.code === 'SESSION_STALL').length, 0);
+  const hit = runs[3].filter((e) => e.code === 'SESSION_STALL');
   assert.equal(hit.length, 1);
   assert.equal(hit[0].severity, 'P2');
-  assert.equal(hit[0].evidence.basis, 'projection-delta-flat');
+  assert.equal(hit[0].evidence.basis, 'events-flow-but-no-llm-tool-time');
+  assert.equal(hit[0].evidence.asOfSeq, 103);
   assert.ok(hit[0].reason.includes('推断'));
+});
+
+test('M3: SESSION_STALL 已结束/空闲会话（asOfSeq 冻结）不报 —— 实测 45.6% 噪声的源头', () => {
+  const det = detect.createDetector({ stallTicks: 2 });
+  // 投影里已结束会话与停摆会话**无法区分**，都是「asOfSeq 冻结 + 时间不增」；
+  // 故只认「事件在流」这一种可观测异常 —— 冻结的一律不报。
+  const s = { id: 'sess-done', steps: 4, asOfSeq: 500, dLlmMs: 0, dToolMs: 0, dSteps: 0, llmMs: 900, toolMs: 400 };
+  for (let i = 0; i < 6; i += 1) {
+    const e = det.run({ now: 1000 * (i + 1), sessions: { sessions: [s] } });
+    assert.equal(e.filter((x) => x.code === 'SESSION_STALL').length, 0, `第 ${i + 1} 周期不得报`);
+  }
 });
 
 test('M3: 会话有增量时不报停摆', () => {
   const det = detect.createDetector({ stallTicks: 2 });
-  const s = { id: 'sess-2', steps: 4, dLlmMs: 500, dToolMs: 0, dSteps: 1, llmMs: 10, toolMs: 5 };
-  det.run({ now: 1000, sessions: { sessions: [s] } });
-  const e = det.run({ now: 2000, sessions: { sessions: [s] } });
+  const mk = (seq) => ({ id: 'sess-2', steps: 4, asOfSeq: seq, dLlmMs: 500, dToolMs: 0, dSteps: 1, llmMs: 10, toolMs: 5 });
+  det.run({ now: 1000, sessions: { sessions: [mk(1)] } });
+  const e = det.run({ now: 2000, sessions: { sessions: [mk(2)] } });
   assert.equal(e.filter((x) => x.code === 'SESSION_STALL').length, 0);
 });
 
 test('M3: reset() 清空全部内部状态（供测试与热重载）', () => {
-  const det = detect.createDetector({ hotStreak: 1 });
+  const det = detect.createDetector({ hotStreak: 1, goneMinTicks: 1 });
   const row = { pid: 1, cpuPct: 95 };
   det.run({ now: 1000, procs: { source: 'ffi', rows: [row] } });
   det.reset();
   const e = det.run({ now: 1100, procs: { source: 'ffi', rows: [row] } });
   assert.equal(e.filter((x) => x.code === 'HOT_PROCESS').length, 1, 'reset 后抑制表清空，可再次上报');
+  // pidTicks 也必须被清空：否则 reset 后 pid 1 的「连续存在」计数会带着旧值继续累加
+  det.reset();
+  det.run({ now: 1200, procs: { source: 'ffi', rows: [row] } });
+  const gone = det.run({ now: 1300, procs: { source: 'ffi', rows: [] } });
+  assert.equal(gone.filter((x) => x.code === 'PROCESS_GONE').length, 1, 'reset 后 pidTicks 归零，1 个周期即可判定');
 });
 
 // ══════════════════════════════════════════════════════════════════════
