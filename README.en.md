@@ -144,21 +144,61 @@ node cap.mjs alias "<entry>" <aka> # curated aliases (bridges lexical gaps like 
 node cap.mjs interface             # interface surface: services / Typert Remotes / client slots / routes
 node cap.mjs monitor --live        # resource monitor: sample the whole process tree right now
 node cap.mjs diagnose              # tiered diagnosis: P0–P3 by certainty
-node cap.mjs fixprompt             # generate a fix prompt (text only — nothing is executed)
+node cap.mjs fixprompt [--no-ticket] # generate a fix prompt (default: also opens fix tickets)
+node cap.mjs fixes [list]           # fix ledger: pending list + recurrence verification
+node cap.mjs fixes show <id>        # one ticket's verification detail
+node cap.mjs fixes close <id>       # declare it fixed (a declaration, not a measurement)
+node cap.mjs fixes adopt --code=X --kind=tool --name=edit --at="<ISO>"
+                                    # back-fill a ticket for something you fixed before this existed
 ```
 
+### Fix ledger (v0.11.0)
+
+Diagnosis says *what is broken*; the fix prompt says *how to fix it*; **nothing remembered that
+you fixed it** — so a resolved finding stayed on the list forever.
+
+Every fix-prompt generation now opens a **ticket** per selected finding (finding key, counts at
+that moment, prompt sha1, timestamp). The timestamp is the **recurrence boundary**: verification
+re-reads the ledger *after* that moment and **re-runs the very same `diagnose()`** (`minCount:1`,
+no topK truncation) — never a second counting implementation, or you eventually get "diagnosis
+says it's still there, the ledger says it's fixed", which is worse than having no ledger at all.
+
+| State | Meaning | Stays pending? |
+| --- | --- | --- |
+| `recurring` | seen again ≥1× after the ticket | **yes, sorted first** |
+| `watching` | window not yet elapsed | **yes**, flagged separately |
+| `resolved` | full window, 0 recurrences | moved out |
+| `declared` | you clicked "mark fixed" | moved out — a **declaration**, not a measurement |
+| `superseded` | a newer ticket exists for the same finding | not counted |
+| `notFixable` | tiered P3 — not this host's to fix | **never in the pending list** |
+
+Three honesty rules (also in the header of `lib/fixes.js`): "not seen again" ≠ "root cause gone"
+(the trigger path may simply not have been walked — so the observation window is always shown
+next to the verdict); manual close is a declaration; and unticketed items are never removed on
+weak evidence (they only get a `stale` annotation). `watching` deliberately stays pending —
+treating "haven't watched long enough" as "fixed" is the easiest way to build a fake dashboard.
+
+P3 items are excluded from the pending list on purpose: the plugin itself calls them
+`fixable:false` (provider rate limits / quota / transport), and the fix prompt lists them under
+"do not fix". Putting 2797 `RATE_LIMIT` records under "to fix" is lying by category — it both
+cannot be fixed here and pushes the genuinely fixable P1 items off the list.
+
 Data lives under `~/.dsh/data/efficiency/` — `capabilities.json`, `ledger/` (`events.v1.jsonl`),
-`monitor/` (`monitor.v1.jsonl` + `events.v1.jsonl`). One plugin, one data directory.
+`monitor/` (`monitor.v1.jsonl` + `events.v1.jsonl`), `ledger/fixes.v1.jsonl` (tickets).
+One plugin, one data directory.
 
 ## Verified on a real machine
 
-- **216/216 unit tests green** (`npm test` → `node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs test/client.test.mjs`)
+- **258/258 unit tests green** (`npm test` → `node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs test/client.test.mjs test/fixes.test.mjs`)
 - Real inventory: **763 entries** — skill 351 · software 109 · env 81 · memory 16 · plugin 10 · automation 9 · hardware 7 · tool 5 · mcp 1
   (plus **174** interface entries)
 - Live host evidence: boot scan, **reactive watcher**, **20-min periodic** scans, real `session/event` error capture,
-  a **16 428-record** ledger backfilled from 1.2 GB of session logs, and a **0.21% self-cost** heartbeat measured in-process
+  a **21 856-record** ledger backfilled from 1.2 GB of session logs, and a **0.21% self-cost** heartbeat measured in-process
 - A **settings page** ("DSH 效率机") shipped in v0.10.0 as a client half (`lib/client.js`) registering into the
   `settings.section` slot — live process table, inventory overview, graded diagnostics, fix-prompt generation
+- A **fix ledger** (v0.11.0) that converges the pending list: tickets opened at prompt-generation time, recurrence
+  verified by re-running the *same* `diagnose()`, and P3 excluded so "cannot be fixed here" never masquerades as
+  "to be fixed" (real run: 191 pending + 28 not-ours-to-fix, where the top of the list used to be provider noise)
 - **Nine real-machine defects found and fixed** — three by live RPC probes before release
   (Cordis service access throwing, the light scan wiping interface entries, self-cost mis-attributing host CPU),
   three from the settings page (a 500px flex gap, an unlabelled CPU basis, ledger totals read from the wrong route),

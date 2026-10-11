@@ -167,10 +167,34 @@ const FIXTURES = {
       P0: [{ code: 'PLUGIN_FAILED', subject: { kind: 'plugin', name: 'demo' }, count: 7, sessionCount: 2 }],
       P1: [], P2: [], P3: []
     }
+  },
+  // 修复台账（v0.11.0）：状态与复发次数一律由 Host 侧算好，页面只呈现。
+  '/api/efficiency/fixes': {
+    schema: 'dsh-efficiency/fixes/v1',
+    counts: {
+      pending: 219, recurring: 1, watching: 2, unticketed: 216,
+      resolved: 3, declared: 1, superseded: 0, notFixable: 27, tickets: 7, activeTickets: 5
+    },
+    pending: [
+      {
+        key: 'FS_EDIT_NOT_FOUND|tool:edit', code: 'FS_EDIT_NOT_FOUND', severity: 'P1',
+        subject: { kind: 'tool', name: 'edit' }, count: 925, sessionCount: 162,
+        state: 'recurring', stateLabel: 'RECUR_SENTINEL', authoritative: true,
+        recurred: 4, note: 'NOTE_SENTINEL',
+        ticket: { id: 'fix-abc123', at: 1791738000000, by: 'cli' }
+      },
+      {
+        key: 'FS_NOT_OBSERVED|tool:edit', code: 'FS_NOT_OBSERVED', severity: 'P1',
+        subject: { kind: 'tool', name: 'edit' }, count: 543, sessionCount: 113,
+        state: 'watching', stateLabel: 'WATCH_SENTINEL', authoritative: false,
+        recurred: 0, note: 'WATCHNOTE_SENTINEL', ticket: null
+      }
+    ],
+    resolved: [], watching: [], declared: [], superseded: [], staleUnticketed: []
   }
 }
 
-test('客户端页面：取数走 5 条只读路由，并把后端原样的数渲染出来', async () => {
+test('客户端页面：取数走 6 条只读路由，并把后端原样的数渲染出来', async () => {
   const def = await loadBundle()
   const mod = def.factory(() => ReactShim)
   const { ctx, getReg } = makeCtx()
@@ -203,7 +227,7 @@ test('客户端页面：取数走 5 条只读路由，并把后端原样的数�
 
     const text = renderText(reg.comp, { t: (k) => k }).join('  ')
 
-    assert.deepEqual(asked.sort(), Object.keys(FIXTURES).sort(), '必须且只取这 5 条路由')
+    assert.deepEqual(asked.sort(), Object.keys(FIXTURES).sort(), '必须且只取这 6 条路由');
 
     // 概览：能力条目 / 技能 / 插件 / 接口
     assert.match(text, /762/, '能力条目数必须上屏')
@@ -236,6 +260,15 @@ test('客户端页面：取数走 5 条只读路由，并把后端原样的数�
     assert.match(text, /PLUGIN_FAILED/, 'finding code 必须上屏')
     assert.match(text, /plugin:demo/, 'finding 主体必须上屏')
     assert.match(text, /P3/, 'P3 档位必须可见')
+    // 修复台账（v0.11.0）：状态文案与复发次数**必须原样来自 Host**，页面不得二次判定
+    assert.match(text, /修复台账/, '必须有「修复台账」卡片')
+    assert.match(text, /RECUR_SENTINEL/, '工单状态文案必须原样上屏（页面不得自己算）')
+    assert.match(text, /WATCH_SENTINEL/, '「已开单待观察」必须与「已修好」区分开')
+    assert.match(text, /NOTE_SENTINEL/, '复发说明必须上屏')
+    assert.match(text, /在用工单/, '在用工单数必须上屏')
+    // 「不修（非本机问题）」必须与「待修」分开 —— 混在一起就是按类别说谎
+    assert.match(text, /不修（非本机问题）/, '「不修」必须单列一格')
+    assert.match(text, /27/, '不修条目数必须上屏')
   } finally {
     globalThis.fetch = realFetch
     globalThis.setInterval = realSetInterval

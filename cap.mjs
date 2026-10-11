@@ -21,7 +21,10 @@
 //   node cap.mjs interface [kind]         # 接口面（v0.9.0：service/remote/slot/row/route）
 //   node cap.mjs monitor [--watch] [--json] [--selfcheck]   # 资源监控（v0.9.0）
 //   node cap.mjs diagnose [--min=N] [--severity=P0]         # 分级诊断（v0.9.0）
-//   node cap.mjs fixprompt [--out=f.md]                     # 修复提示词（v0.9.0）
+//   node cap.mjs fixprompt [--out=f.md] [--no-ticket]          # 修复提示词（v0.9.0，v0.11.0 起开修复工单）
+//   node cap.mjs fixes [list|show <id>|close <id>|adopt]        # 修复台账与待修清单收敛（v0.11.0）
+//   node cap.mjs fixes adopt --code=X --kind=tool --name=edit --at="2026-10-11 20:00"
+//     [--window=<ms>]  观察窗口下限（默认 30 分钟）　[--stale=<ms>] 久未见阈值（默认 6 小时）
 
 import { scanAll } from './lib/scanner.js';
 import { load, applyScan } from './lib/registry.js';
@@ -230,8 +233,15 @@ switch (cmd) {
     });
     break;
   }
+  case 'fixes': {
+    fixesCmd(rest).catch((e) => {
+      printJson({ ok: false, error: String(e?.message ?? e) });
+      process.exit(1);
+    });
+    break;
+  }
   default:
-    console.error('用法: node cap.mjs <scan|list|query|doctor|guide|stale|alias|brief|ledger|interface|monitor|diagnose|fixprompt> [args]');
+    console.error('用法: node cap.mjs <scan|list|query|doctor|guide|stale|alias|brief|ledger|interface|monitor|diagnose|fixprompt|fixes> [args]');
     process.exit(1);
 }
 
@@ -608,25 +618,131 @@ async function diagnoseCmd(rest) {
 async function fixpromptCmd(rest) {
   const flags = ledgerFlags(rest);
   const { diagnose } = await import('./lib/diagnose.js');
-  const { buildFixPrompt } = await import('./lib/fixprompt.js');
+  const { buildFixPrompt, pickFixables } = await import('./lib/fixprompt.js');
   const { records, since } = await loadDiagnoseInputs(flags);
 
   const d = diagnose(records, { since, minCount: Number(flags.min) || 3 });
-  const text = buildFixPrompt(d, {
+  const opts = {
     profile: typeof flags.profile === 'string' ? flags.profile : 'desktop',
     home: typeof flags.home === 'string' ? flags.home : undefined,
     ledgerDir: typeof flags.ledger === 'string' ? flags.ledger : undefined,
     repoDir: typeof flags.repo === 'string' ? flags.repo : undefined,
     maxItems: Number(flags.top) || 8,
     includeP3: flags.p3 !== 'false',
-  });
+  };
+  const text = buildFixPrompt(d, opts);
+
+  // ── 开修复工单（v0.11.0） ──────────────────────────────────────
+  // 工单记「这份提示词列了哪几条 + 生成时刻」；生成时刻是之后判断
+  // 「修后有没有再复发」的分界线，没有它待修清单无法收敛。
+  // `--no-ticket` 只出提示词、不落台账（用于「只想看看」的场景）。
+  const tickets = [];
+  let ticketError;
+  if (flags.ticket !== 'false') {
+    try {
+      const { openTicket } = await import('./lib/fixes.js');
+      for (const f of pickFixables(d, opts)) {
+        const { ticket: tk, superseded } = await openTicket({
+          finding: f, prompt: text, by: 'cli', windowSince: since, minCount: d.minCount,
+        }, flags.ledger);
+        for (const old of superseded) console.error(`  ↳ 取代旧工单 ${old}（同一故障）`);
+        tickets.push(tk);
+      }
+    } catch (e) {
+      ticketError = String(e?.message ?? e);
+      console.error(`⚠ 修复工单写入失败（提示词仍已生成）：${ticketError}`);
+    }
+  }
 
   if (typeof flags.out === 'string') {
     const { writeFileSync } = await import('node:fs');
     writeFileSync(flags.out, text, 'utf8');
-    printJson({ ok: true, out: flags.out, chars: text.length });
+    printJson({
+      ok: true, out: flags.out, chars: text.length,
+      tickets: tickets.map((t) => ({ id: t.id, code: t.code, subject: t.subject })),
+      ticketError,
+    });
     return;
   }
   // 直接吐纯文本（便于管道 / 复制）
   console.log(text);
+  if (tickets.length) {
+    console.error('');
+    console.error(`已开修复工单 ${tickets.length} 条（待你修完后用 \`node cap.mjs fixes\` 看待修清单收敛）：`);
+    for (const t of tickets) console.error(`  ${t.id}　${t.code}　${t.subject.kind}:${t.subject.name}`);
+  }
 }
+
+/** `--at` 解析：纯数字按毫秒时间戳，否则按可被 Date 解析的字符串。 */
+function parseWhen(v) {
+  if (v === undefined || v === true) return undefined;
+  const s = String(v).trim();
+  if (/^\d+$/.test(s)) return Number(s);
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : undefined;
+}
+
+async function fixesCmd(rest) {
+  const flags = ledgerFlags(rest);
+  // 位置参数 = 非 `--flag` 项。⚠ 不能取 `rest[0]`：`--ledger=…` 也会出现在 rest 里，
+  // 取错了就会把 flag 当成子命令/工单号（踩过一次：`fixes show --ledger=X <id>` 报「未找到工单 --ledger=X」）。
+  const pos = rest.filter((a) => !String(a).startsWith('--'));
+  const sub = pos[0] ?? 'list';
+  const arg = pos[1];
+  const F = await import('./lib/fixes.js');
+
+  if (sub === 'close') {
+    if (!arg) { console.error('用法：node cap.mjs fixes close <id> [--note="..."]'); process.exitCode = 2; return; }
+    const rec = await F.closeTicket(arg, { by: 'cli', note: typeof flags.note === 'string' ? flags.note : undefined }, flags.ledger);
+    if (!rec.matched) {
+      console.error(`⚠ 未找到工单 ${rec.id} —— 该关闭记录已写入但**没有对应工单**，将作为孤儿记录报出。请核对 id。`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`已关闭工单 ${rec.id}（人工声明，不是测量）${rec.note ? `　备注：${rec.note}` : ''}`);
+    return;
+  }
+
+  if (sub === 'adopt') {
+    const at = parseWhen(flags.at);
+    if (!flags.code || !flags.kind || !flags.name || at === undefined) {
+      console.error('用法：node cap.mjs fixes adopt --code=<错误码> --kind=tool --name=<主体名> --at="2026-10-11 20:00" [--note="..."]');
+      console.error('说明：为「功能上线前已经修过」的条目补一张工单，让复发核验有分界线。');
+      process.exitCode = 2; return;
+    }
+    const rec = await F.adoptTicket({
+      code: String(flags.code), subject: { kind: String(flags.kind), name: String(flags.name) },
+      at, by: 'cli', note: typeof flags.note === 'string' ? flags.note : undefined,
+    }, flags.ledger);
+    console.log(`已补开工单 ${rec.id}　${rec.code}　${rec.subject.kind}:${rec.subject.name}　分界线 ${new Date(rec.at).toISOString()}`);
+    return;
+  }
+
+  // list / show
+  const { diagnose } = await import('./lib/diagnose.js');
+  const { records } = await loadDiagnoseInputs(flags);
+  const d = diagnose(records, { minCount: Number(flags.min) || 3 });
+  const j = await F.readFixes(flags.ledger);
+
+  if (sub === 'show') {
+    const tk = j.tickets.find((t) => t.id === arg);
+    if (!tk) { console.error(`未找到工单 ${arg}`); process.exitCode = 1; return; }
+    const v = F.verifyTicket(tk, records, {});
+    printJson({ ticket: tk, verification: v, orphans: j.orphans.filter((o) => o.id === tk.id) });
+    return;
+  }
+
+  const vs = F.verifyAll(j.tickets, records, {
+    minWindowMs: Number(flags.window) || undefined,
+    staleAfterMs: Number(flags.stale) || undefined,
+  });
+  const rep = F.buildOpenList(d, vs, {
+    minWindowMs: Number(flags.window) || undefined,
+    staleAfterMs: Number(flags.stale) || undefined,
+  });
+  if (flags.json === true || flags.json === 'true') { printJson({ ...rep, badLines: j.badLines }); return; }
+  console.log(F.renderFixes(rep));
+  if (j.badLines) console.log(`\n⚠ 台账有 ${j.badLines} 行无法解析（已跳过）`);
+  if (j.orphans.length) console.log(`⚠ 有 ${j.orphans.length} 条孤儿关闭记录（找不到对应工单）`);
+}
+

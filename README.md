@@ -193,7 +193,12 @@ node cap.mjs monitor events          # 检出事件（HOT_PROCESS / MEMORY_GROWT
 node cap.mjs monitor selfcheck       # 采集器自检（自耗是否超过心跳的 0.5%）
 
 node cap.mjs diagnose [--min=N] [--severity=P0]   # 分级诊断
-node cap.mjs fixprompt [--out=f.md]               # 生成修复提示词（只生成，不自动执行）
+node cap.mjs fixprompt [--out=f.md] [--no-ticket] # 生成修复提示词（默认同时开修复工单）
+node cap.mjs fixes [list]                         # 修复台账：待修清单 + 复发核验
+node cap.mjs fixes show <id>                      # 单张工单的核验详情
+node cap.mjs fixes close <id> [--note="..."]      # 人工声明已修（声明，不是测量）
+node cap.mjs fixes adopt --code=X --kind=tool --name=edit --at="2026-10-11T17:00Z"
+                                                  # 为「上线前已经修过」的条目补一张工单
 node cap.mjs interface                            # 接口面清册（服务/Remote/插槽/路由）
 ```
 
@@ -204,6 +209,50 @@ node cap.mjs interface                            # 接口面清册（服务/Rem
 `intervalMs` / `idleMs` / `sampleIntervalMs` / `maxSamples` / `keepRaw` / `detect.{hotCpuPct,hotStreak,
 memGrowthMbPerMin,memStreak,ioStormMbPerTick,stallTicks,cooldownMs}` / `dir`；
 `diagnose: false` 关掉两条诊断 RPC（**CLI 不受影响**——它直读落盘数据，不经宿主）。
+
+## 修复台账（v0.11.0）
+
+**解决什么**：诊断告诉你「什么坏了」，修复提示词告诉你「怎么修」，但**没有东西记得你修过**——
+于是同一条 finding 修完之后还在清单里，你无法回答「这条我到底修了没有、修了之后还复发吗」。
+
+**工单（ticket）**：每次生成修复提示词时，为入选的每条 finding 自动开一张工单，记录
+finding 键、当时的次数与会话数、提示词 sha1、开单时刻。**开单时刻就是复发核验的分界线。**
+
+**复发核验**：取「开单时刻之后」的账本记录，**重跑同一个 `diagnose()`**（`minCount:1`、
+`topK` 不截断），按同一套分组键找回原 finding。这里刻意**不复用另一套计数逻辑**——
+否则迟早出现「诊断说还在、台账说修好了」的分歧，而这种分歧比没有台账更糟。
+
+**待修清单怎么收敛**：
+
+| 状态 | 含义 | 是否留在待修 |
+| --- | --- | --- |
+| `recurring` | 开单后又出现 ≥1 次 | **留在待修并置顶**——「以为修好了结果没好」最值钱 |
+| `watching` | 刚开单，观察窗口不足 | **留在待修**并单独标注 |
+| `resolved` | 窗口已满且 0 次复发 | 移出，单列「未再复发」 |
+| `declared` | 人工点了「标记为已修」 | 移出，单列——**这是声明，不是测量** |
+| `superseded` | 同一 finding 又开了新工单，旧单程序性关闭 | 不占待修位，单列 |
+| `unticketed` | 从未生成过修复提示词 | 留在待修 |
+| `notFixable` | 档位判为「不是本机该修的」（P3） | **不在待修里**，单列 |
+
+三条诚实纪律写在 `lib/fixes.js` 文件头，也体现在上表：
+
+1. **「未再复发」≠「根因已消除」**——触发路径没被走到时同样显示 0 次。所以用词是
+   「未再复发」而不是「已修复」，且**观察窗口长度必须与结论同屏**。
+2. **人工关闭是声明不是测量**，单列 `declared`，不混进 `resolved`。
+3. **无工单的条目不得凭弱证据移出**：久未见只加 `stale` 标注，仍留在待修清单里。
+   同理，`watching`（窗口不足）**不移出**——把「还没看够」当「已经好了」是这个功能
+   最容易做成的假看板。
+
+**为什么 P3 不进待修清单**：P3 是本插件自己判定 `fixable:false` 的条目（供应商限流 /
+配额 / 断流 / 网络），修复提示词里专门列在「不要修」一节。把 2797 次 `RATE_LIMIT`
+这类条目摆进「待修」是**按类别说谎**：它既修不了，又会把真正该修的 P1 挤到列表后面
+（实测 219 条待修里前几条全是 P3）。它们单列 `notFixable`，仍如实计数、仍可查。
+
+**「上线前已经修过」的条目**：用 `fixes adopt --at=<时间>` 补一张工单，`basis` 标
+`adopted-by-user`——**分界线是你给的时间，不是系统猜的**。
+
+**RPC**：`GET /api/efficiency/fixes`（台账 + 核验 + 待修清单）、`POST /fixes/close`、
+`POST /fixes/adopt`。设置页有对应的「修复台账」卡片。
 
 ## 错误账本（v0.8.0）
 
