@@ -144,9 +144,17 @@ const FIXTURES = {
   '/api/efficiency/monitor/procs': {
     source: 'ffi', cores: 12, wallMs: 504, totalWorkingSetMB: 5801,
     cached: true, sampleAgeMs: 4200,
+    // 范围必须由服务端给出：页面此前不说范围，看起来就像一张「全机进程表」
+    scope: { root: 32832, basis: 'dsh-process-tree', note: 'SCOPE_SENTINEL' },
+    groupTotals: {
+      core: { count: 1, cpuPct: 143.75, workingSetMB: 1981 },
+      task: { count: 1, cpuPct: 2.5, workingSetMB: 120.4 }
+    },
+    gone: [{ pid: 42676, name: 'powershell.exe', kind: 'shell', reason: 'OpenProcess denied' }],
+    goneNote: 'GONE_SENTINEL',
     procs: [
-      { pid: 42256, kind: 'host', cpuPct: 143.75, workingSetMB: 1981, name: 'DSH Desktop.exe' },
-      { pid: 20412, kind: 'utility', cpuPct: 2.5, workingSetMB: 120.4, name: 'node.exe' }
+      { pid: 42256, kind: 'host', group: 'core', cpuPct: 143.75, workingSetMB: 1981, name: 'DSH Desktop.exe' },
+      { pid: 20412, kind: 'node', group: 'task', cpuPct: 2.5, workingSetMB: 120.4, name: 'node.exe' }
     ],
     cpuBasis: 'CPUBASIS_SENTINEL',
     disclaimer: 'DISCLAIMER_SENTINEL'
@@ -214,10 +222,70 @@ test('客户端页面：取数走 5 条只读路由，并把后端原样的数�
     assert.match(text, /最近一次心跳采样/, '必须标明数据取自缓存采样')
     assert.match(text, /4 秒前|4秒前/, '必须标明采样距今多久')
     assert.match(text, /DISCLAIMER_SENTINEL/, '后端免责说明必须原样上屏（不得吞掉）')
+    // 分组：这张表只讲 DSH —— 本体一组、DSH 调起的任务进程一组，各自带小计
+    // （注意：apply 会把真实 locale 的 t 覆盖进来，故这里断言的是**中文正文**）
+    assert.match(text, /DSH 本体/, '必须有「DSH 本体」分组表头')
+    assert.match(text, /DSH 调起的任务进程/, '必须有「DSH 调起的任务进程」分组表头')
+    // 范围必须自述（否则这张表看起来像全机进程表，老板正是这么读的）
+    assert.match(text, /范围：SCOPE_SENTINEL/, '范围说明必须原样上屏')
+    // 采样时已退出的进程被过滤掉，但必须如实交代，不得静默丢弃
+    assert.match(text, /GONE_SENTINEL/, '已退出进程的说明必须上屏')
+    // 角色名必须本地化（真实词典：host → 宿主 (Node)）
+    assert.match(text, /宿主 \(Node\)/, '角色名必须本地化上屏')
     // 诊断：分档 + 可修/不可修 + 条目
     assert.match(text, /PLUGIN_FAILED/, 'finding code 必须上屏')
     assert.match(text, /plugin:demo/, 'finding 主体必须上屏')
     assert.match(text, /P3/, 'P3 档位必须可见')
+  } finally {
+    globalThis.fetch = realFetch
+    globalThis.setInterval = realSetInterval
+    globalThis.clearInterval = realClearInterval
+  }
+})
+
+test('客户端进程表：不得按 CPU 截断 —— 0% CPU 的任务进程必须全部上屏', async () => {
+  const def = await loadBundle()
+  const mod = def.factory(() => ReactShim)
+  const { ctx, getReg } = makeCtx()
+  mod.apply(ctx)
+  const reg = getReg()
+
+  // 12 个本体（有 CPU）+ 12 个 0% CPU 的任务进程
+  const procs = []
+  for (let i = 0; i < 12; i++) procs.push({ pid: 1000 + i, kind: 'renderer', group: 'core', cpuPct: Math.max(0, 10 - i), workingSetMB: 100, name: 'DSH Desktop.exe' })
+  for (let i = 0; i < 12; i++) procs.push({ pid: 2000 + i, kind: 'shell', group: 'task', cpuPct: 0, workingSetMB: 5, name: `task${i}.exe` })
+  const body = {
+    source: 'ffi', cores: 12, cached: false,
+    scope: { root: 1, basis: 'dsh-process-tree', note: 'S' },
+    groupTotals: { core: { count: 12, cpuPct: 54, workingSetMB: 1200 }, task: { count: 12, cpuPct: 0, workingSetMB: 60 } },
+    gone: [], procs
+  }
+
+  const realFetch = globalThis.fetch
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  globalThis.fetch = async (url) => {
+    const b = url === '/api/efficiency/monitor/procs' ? body : FIXTURES[url]
+    if (!b) throw new Error(`未预期的 URL：${url}`)
+    return { ok: true, status: 200, json: async () => b }
+  }
+  globalThis.setInterval = () => 0
+  globalThis.clearInterval = () => {}
+
+  try {
+    store = []
+    renderText(reg.comp, { t: (k) => k })
+    for (const fn of effects) fn()
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    const text = renderText(reg.comp, { t: (k) => k }).join('  ')
+    // 旧实现 `.slice(0, 8)`：12 个 0% CPU 的任务进程会被整批砍掉，
+    // 而「看 DSH 调起的任务线程」恰恰是这个页面存在的理由（老板原话 m01585）。
+    for (let i = 0; i < 12; i++) {
+      assert.match(text, new RegExp(`\\b${2000 + i}\\b`), `任务进程 pid ${2000 + i} 被截断`)
+    }
+    assert.match(text, /DSH 本体 · 12 个/, '本体组表头必须给出条数')
+    assert.match(text, /DSH 调起的任务进程 · 12 个/, '任务组表头必须给出条数')
   } finally {
     globalThis.fetch = realFetch
     globalThis.setInterval = realSetInterval

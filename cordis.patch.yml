@@ -1,6 +1,22 @@
 # dsh-efficiency bundle 层 —— DSH 效率机（能力索引 + 资源监控 + 错误账本 + 分级诊断）。
 #
-# build: 2026-10-11-v0.10.1-efficiency-1（设置页实测六项修复 D1–D6）
+# build: 2026-10-11-v0.10.2-efficiency-1（资源占用范围收窄 + 幽灵行过滤 + 按 DSH 分组）
+#
+# v0.10.2（老板 m01585：「资源占用我是希望看 dsh 和 dsh 调起的的任务线程的资源占用，
+# 非 dsh 引起的资源占用我直接在 windows 看就行了」）：核验后发现**范围本来就是对的**
+# ——`listProcesses()` 走 `walk(root)`，root 是从 Host PID 上溯到的最顶层 DSH 祖先，
+# 表里 21 个进程每个的 ppid 链都落在 DSH 上，没有非 DSH 进程混入。真问题在**呈现**：
+#   P1 幽灵行：进程树有 30s TTL 缓存，而 DSH 调起的 powershell/conhost 是**短命子进程**
+#      ⇒ 树里留着已退出的 PID，`OpenProcess` 返回 0 ⇒ 旧实现吐出 cpuPct/ws 双 `-` 的行。
+#      实测 21 行里 2 行是这种幽灵（`Get-Process -Id` 复验 GONE）。这种行无信息，还会
+#      让人误判成「混进来的非 DSH 进程」⇒ 过滤掉，但**如实计数**（`gone`/`goneNote`）。
+#   P2 无分组：整张表是裸列表，`kind: 'other'` 是无意义兜底，正是老板想看的「DSH 调起的
+#      任务进程」全落在这个桶里（powershell/cmd/conhost）。⇒ 新增 `groupOf()` 分两组
+#      （`core` DSH 本体 / `task` DSH 调起的任务进程）+ 各自小计；`other` 改名 `task`、
+#      新增 `shell`；页面用中文本地化角色名并给出「范围＝DSH 进程树」自述。
+#   P3 按 CPU 截断：客户端 `.slice(0, 8)` ⇒ 21 个进程里所有 0% CPU 的**任务进程被整批
+#      砍掉**，而「看 DSH 调起的任务」恰恰是这个页面存在的理由 ⇒ 改为全量列出。
+# 真机复验：16 行 / 幽灵行 0 / 过滤 4 / core 8 (333.09% · 4515.4MB) / task 8 (0% · 671.6MB)。
 #
 # v0.10.1（设置页实测后收紧）：老板在设置页看到「中间一大片空白」「CPU 209.4%」并
 # 要求全量核验，逐项取证后修了六处 ——
@@ -64,7 +80,8 @@
 #        flushMs: 缓冲落盘间隔毫秒（默认 2000，下限 5000）
 #        maxPending: 内存缓冲上限，溢出丢最旧并计数（默认 5000）
 #        recordInterrupts: 记录 assistant/message.interrupted（默认 true）
-#        recordLoader: 记录插件装载期错误（默认 true）
+#        （recordLoader 已于本次修复移除：loader/partial-dispose 是配置重放期的
+#          生命周期簿记事件、不是错误，此前把它记成 LOADER_DISPOSE 造成 5058 条假 P0）
 #        backfillOnBoot: 启动后回填历史会话日志（默认 true）
 #        backfillDelayMs: 回填延迟毫秒（避让启动高峰，默认 8000）
 #        backfillMaxFiles: 单次回填文件数上限，0=不限（默认 0）

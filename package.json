@@ -1,6 +1,6 @@
 {
   "name": "dsh-efficiency",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "DSH 效率机：①索引并快速定位工具/插件/环境/接口（含宿主 Cordis 服务、Typert Remote、客户端插槽、HTTP 路由），为其他插件高效工作提供支持；②监控运行中的插件/工具/技能等资源调度（进程层 koffi FFI 直读 + 会话层投影差分 + 插件层 Fiber 阶段），检出热点/内存增长/IO 风暴/装载失败等异常，防范卡死崩溃；③记录每个会话的报错并按插件/技能/对象/责任方等切面聚合，做 P0–P3 分级诊断并生成修复提示词，供自修复与自进化；装上即得（自供给 efficiency-lookup 技能 + 三段系统提示词，免改用户任何文件）。",
   "type": "module",
   "main": "lib/index.js",

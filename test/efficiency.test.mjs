@@ -110,9 +110,19 @@ test('M4: 文件系统类错误分到 P1（本机可修且证据充分）', () =
 });
 
 test('M4: 加载器/宿主契约失败分到 P0（宿主自己报的确定失败）', () => {
-  for (const code of ['LOADER_DISPOSE', 'PLUGIN_FAILED', 'HOST_CONTRACT']) {
+  for (const code of ['PLUGIN_FAILED', 'HOST_CONTRACT']) {
     assert.equal(SEVERITY_RULES[code].severity, 'P0', `${code} 应为 P0`);
   }
+});
+
+test('M4: LOADER_DISPOSE 不是错误 —— loader/partial-dispose 是生命周期簿记，历史误报降级 P3', () => {
+  // 取证（实读宿主源码）：cordis-plugin-loader/src/config/entry.ts:139-155 在**配置变更**时
+  // emit（第二参 legacy 是上一版 options 对象）、group.ts:37-46 在移除 entry 时 emit、
+  // group.ts:27 的 `entry.update(options, true, true)` 带 force ⇒ 每次整树重放对每个 entry
+  // 强制触发。v0.8.0–v0.10.1 把它记成 PluginLoadError/LOADER_DISPOSE ⇒ 5058 条假 P0 霸榜，
+  // 并生成「检查插件依赖与 peer 兼容性」这种查不到东西的修法。
+  assert.equal(SEVERITY_RULES.LOADER_DISPOSE.severity, 'P3');
+  assert.equal(SEVERITIES.P3.fixable, false, 'P3 不得进「本机该修」清单');
 });
 
 test('M4: 供应商类错误分到 P3 —— 实测占全量错误四成，绝不能让 agent 去「修」限流', () => {
@@ -740,7 +750,47 @@ test('M2: classify 识别宿主自身 / renderer / NodeService / 主进程', () 
   assert.equal(procs.classify('node.exe', 'dsh-ego-browser\\bin\\ego-cast-worker.mjs', false), 'ego-worker');
   assert.equal(procs.classify('node.exe', '--type=crashpad-handler', false), 'crashpad');
   assert.equal(procs.classify('node.exe', '--type=gpu-process', false), 'gpu');
-  assert.equal(procs.classify('other.exe', 'whatever', false), 'other');
+  // 兜底改名 'other' → 'task'（2026-10-11）：classify 只被 DSH 进程树调用，
+  // 树里每个进程都必然是 DSH 的后代，叫 'other' 会让人误以为混进了非 DSH 进程。
+  assert.equal(procs.classify('other.exe', 'whatever', false), 'task');
+  assert.equal(procs.classify('powershell.exe', 'powershell -NoProfile -c x', false), 'shell');
+  assert.equal(procs.classify('cmd.exe', 'cmd /c x', false), 'shell');
+  assert.equal(procs.classify('conhost.exe', 'conhost', false), 'shell');
+});
+
+test('M2: groupOf 把「DSH 本体」与「DSH 调起的任务进程」分开（页面分组依据）', () => {
+  for (const k of ['main', 'host', 'renderer', 'gpu', 'network', 'crashpad', 'utility']) {
+    assert.equal(procs.groupOf(k), 'core', `${k} 应归 DSH 本体`);
+  }
+  for (const k of ['node', 'tool-runner', 'ego-worker', 'shell', 'task']) {
+    assert.equal(procs.groupOf(k), 'task', `${k} 应归 DSH 调起的任务进程`);
+  }
+  // classify 能产出的每一个 kind 都必须有归属 —— 漏归会静默落到 task，页面就会骗人
+  const producible = ['host', 'ego-worker', 'tool-runner', 'crashpad', 'gpu', 'renderer', 'utility', 'network', 'main', 'node', 'shell', 'task'];
+  for (const k of producible) {
+    assert.ok(['core', 'task'].includes(procs.groupOf(k)), `${k} 无分组`);
+  }
+});
+
+test('M2 回归：采样结果不得含「幽灵行」，且分组小计必须与明细一致', async () => {
+  const s = await procs.sampleAll({ intervalMs: 200 });
+  if (s.source !== 'ffi') return; // 非 Windows / FFI 不可用环境跳过
+  for (const r of s.rows) {
+    assert.ok(r.group === 'core' || r.group === 'task', `pid ${r.pid} 缺 group`);
+    // 真机取证（2026-10-11）：旧实现会把「采样时已退出」的短命子进程也列出来，
+    // 呈现为 cpuPct / workingSetMB 双 '-' 的幽灵行，看起来像混进来的非 DSH 进程。
+    assert.equal(r.err ?? null, null, `pid ${r.pid} 是幽灵行（最新采样失败却仍列出）`);
+    assert.ok(r.workingSetMB != null, `pid ${r.pid} 无工作集却仍列出`);
+  }
+  // 被过滤掉的必须如实计数（不得静默丢弃），且范围必须自述
+  assert.ok(Array.isArray(s.gone), 'gone 必须是数组');
+  assert.ok(s.scope && s.scope.basis === 'dsh-process-tree', 'scope 必须说明这是 DSH 进程树');
+  assert.ok(s.groupTotals && typeof s.groupTotals.core.count === 'number' && typeof s.groupTotals.task.count === 'number');
+  for (const g of ['core', 'task']) {
+    const rs = s.rows.filter((r) => r.group === g);
+    assert.equal(s.groupTotals[g].count, rs.length, `${g} 小计条数与明细不符`);
+  }
+  assert.equal(s.groupTotals.core.count + s.groupTotals.task.count, s.rows.length);
 });
 
 test('M2: cpuPercent = 累计 CPU 差分 / 墙钟', () => {
