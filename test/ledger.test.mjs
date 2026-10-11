@@ -707,7 +707,7 @@ test('T50 apply()：端到端捕获 → 落盘 → 可查询', async () => {
   assert.ok(injected.includes('systemPrompt') && injected.includes('tools') && injected.includes('webServer'), `软注入面缺失：${injected}`);
   assert.ok(routes.includes('/api/efficiency/ledger/stats') && routes.includes('/api/efficiency/ledger/repair'));
   assert.ok(effects.some((l) => l.includes('session capture')));
-  assert.ok(effects.some((l) => l.includes('loader capture')));
+  assert.ok(effects.some((l) => l.includes('loader lifecycle')));
 
   const h = LEDGER.health();
   assert.equal(h.version, PLUGIN_VERSION);
@@ -749,16 +749,19 @@ test('T53 apply()：capture=false 时不订阅任何事件（只留回填）', a
   assert.ok(!effects.some((l) => l.includes('loader capture')));
 });
 
-test('T54 apply()：loader 异常路径入账（插件切面）', async () => {
+test('T54 apply()：loader 生命周期事件只计数、绝不入账（插件切面）', async () => {
   const dir = mkTmp('e2e5');
   const { ctx, handlers } = makeFakeCtx();
-  mountLedgerT(ctx, { dir, sessionsRoot: mkTmp('e2e5-s'), backfillOnBoot: false });
-  handlers.get('loader/partial-dispose')({ options: { id: 'dsh-broken' } }, true, true);
-  await LEDGER.flushNow();
+  const led = mountLedgerT(ctx, { dir, sessionsRoot: mkTmp('e2e5-s'), backfillOnBoot: false });
+  // 宿主真实语义：`entry.update(options, true, true)` 带 force ⇒ 每次整树配置重放都对
+  // 每个 entry emit 一次（第二个参数是**上一版 options 对象**，不是 boolean）。
+  // 把它记成 PluginLoadError / LOADER_DISPOSE 曾是全账本第一大假 P0（实测 5058 条）。
+  handlers.get('loader/partial-dispose')({ options: { id: 'dsh-broken' } }, { isolate: {} }, true);
+  await led.flushNow();
   const { records } = await store.readRecords(dir);
-  assert.equal(records.length, 1);
-  assert.equal(records[0].plugin, 'dsh-broken');
-  assert.equal(records[0].kind, 'plugin');
+  assert.equal(records.length, 0,
+    'loader/partial-dispose 是配置重放期的生命周期簿记事件，不是错误，不得入账');
+  assert.equal(led.stats.loaderEvents, 1, '仍须计数（重放频率要可观测），只是不记账');
 });
 
 test('T55 apply()：RPC handlers 真实可调用（stats / repair / recent）', async () => {
