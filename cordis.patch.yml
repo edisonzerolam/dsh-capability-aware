@@ -1,6 +1,12 @@
 # dsh-efficiency bundle 层 —— DSH 效率机（能力索引 + 资源监控 + 错误账本 + 分级诊断）。
 #
-# build: 2026-10-11-v0.9.0-efficiency-3
+# build: 2026-10-11-v0.10.0-efficiency-1（+ 设置页客户端半边 lib/client.js）
+#
+# 客户端半边（v0.10.0 新增）：`lib/client.js` 把「效率机」注册成
+# DSH 设置页里**独立的一项**（`settings.section` 是 list 槽，导航按 order 生成）。
+# 它由 Web 前端在装载期读取 `package.json` 的 `exports["./client"]` + `dsh.client`
+# 决定是否加载 ⇒ **新增客户端半边同样必须重启**（改 build 行不会让前端重新发现它）。
+# 页面只读同源 `/api/efficiency/*`，不写任何东西。
 #
 # ⚠ 这行的真实作用（**已实测纠正，此前注释不准**）：
 #   动它会触发 DSH 的 `patchReload: live` —— 但那只**重新 apply**，跑的是
