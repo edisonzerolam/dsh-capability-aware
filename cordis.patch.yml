@@ -1,7 +1,17 @@
-# dsh-capability-aware bundle 层 —— 自我能力感知插件。
+# dsh-efficiency bundle 层 —— DSH 效率机（能力索引 + 资源监控 + 错误账本 + 分级诊断）。
 #
-# build: 2026-10-11-v0.8.0-error-ledger（本地适配标记。改 lib/*.js 后**同时**动这一行，
-#        才能触发 DSH 的 patchReload: live 重载插件；实测只改 lib 不会重载）
+# build: 2026-10-11-v0.9.0-efficiency-2
+#
+# ⚠ 这行的真实作用（**已实测纠正，此前注释不准**）：
+#   动它会触发 DSH 的 `patchReload: live` —— 但那只**重新 apply**，跑的是
+#   **Node ESM 缓存里的旧模块**（模块按解析后的 URL 键控，同路径进程内只求值一次）。
+#   实测（2026-10-11）：改完 lib/*.js（含新增 lib/svc.js）+ 刷新安装副本 + 动本行后，
+#   活体仍在报旧代码的错误（`cannot get property "sessionProjections" without inject`），
+#   且 errors 持续递增 182 → 192 ⇒ 新代码**没有**跑起来。
+#   ⇒ **换代码必须重启 DSH Desktop**（托盘菜单「重启」或 `POST /api/desktop/restart`）。
+#   动本行仍然值得做：它能触发一次干净的重新 apply（重建路由与 effect），
+#   对**配置**变更（config 段）是即时生效的 —— 只有**代码**变更必须重启。
+#   例外：**改包名**会换掉解析 URL ⇒ 强制重新求值，改名那次就是这样无重启上线的。
 #
 # 注意（YAML 陷阱，harness-ops §E 实证）：
 #  - 键名不加引号会被 YAML 1.1 误解析（如 "off"），本文件所有字符串值均安全（无 360/off 类）。
@@ -14,21 +24,21 @@
 #  minIntervalMs: 两次扫描最小间隔（防抖风暴下限，默认 30000）
 #  periodicMs: 周期兜底全量扫描间隔毫秒（覆盖 fs.watch 漏事件 + 硬件/软件环境变化，默认 1200000 = 20min；0=关闭）
 #  tools: CLI 探针白名单（缺省 ['python','node','git','rg','dsh']）
-#  provisionSkill: v4.5 自供给技能入口 capability-lookup（默认 true；装上即得，幂等带版本戳）
+#  provisionSkill: v4.5 自供给技能入口 efficiency-lookup（默认 true；装上即得，幂等带版本戳）
 #  provisionAgentsPointer: v4.5 向 ~/.dsh/AGENTS.md 注入带标记的管理块（环境依赖类任务先跑
 #      cap.mjs brief）——**改用户规则文件，默认 false**（公共仓库不得替安装者默认改文件）；
 #      需要的本机可在宿主 profile 侧覆盖为 true。开启后幂等维护、插件升级自动刷新。
 #      开启理由（本机裁决 2026-10-06）：一天实测 harness 0 次主动调用，环境类任务缺一个
 #      必经触发点；本块即该触发点。
 #  promptSection: v0.7.0 常驻指令面——用宿主公开的 ctx.systemPrompt.section() 注入一段
-#      「任务依赖本机环境时起手先 capability_query」的行为规约（默认 true）。
+#      「任务依赖本机环境时起手先 efficiency_query」的行为规约（默认 true）。
 #      **这是「安装即达到应有水平」的关键**：完全不改用户任何文件（不写 AGENTS.md、
 #      不写用户技能目录以外的地方），纯运行时贡献，卸载插件即消失。
 #      与 provisionAgentsPointer 的取舍：后者改用户文件故默认关闭、安装者不可复现；
 #      本项默认开启且跨机可复现。两者内容重叠，装到哪台机器都生效的是本项。
 #  ledger: v0.8.0 错误账本（默认 true；也可传对象细调子项，传 false 整体关闭）
 #      与「能力清单」互补：那边查「有什么能力」，这边查「什么坏了 / 缺什么」。
-#      数据落在 ~/.dsh/data/capability-aware/ledger/（events.v1.jsonl + meta.v1.json）。
+#      数据落在 ~/.dsh/data/efficiency/ledger/（events.v1.jsonl + meta.v1.json）。
 #      子项（ledger: { ... }）：
 #        capture: 实时订阅 session/event 等事件（默认 true）
 #        flushMs: 缓冲落盘间隔毫秒（默认 2000，下限 5000）
@@ -40,11 +50,27 @@
 #        backfillMaxFiles: 单次回填文件数上限，0=不限（默认 0）
 #        backfillMaxBytes: 单次回填解压字节上限（默认 419430400 = 400MB）
 #        sessionsRoot: 会话日志根目录覆盖（默认 <dshHome>/sessions）
-#        dir: 账本数据目录覆盖（默认 <dshHome>/data/capability-aware/ledger）
+#        dir: 账本数据目录覆盖（默认 <dshHome>/data/efficiency/ledger）
 #        promptSection: 是否注入错误账本的常驻指令面（默认 true）
+#  monitor: v0.9.0 资源监控（默认 true；也可传对象细调，传 false 整体关闭）。
+#      数据落在 ~/.dsh/data/efficiency/monitor/（monitor.v1.jsonl + events.v1.jsonl + meta.v1.json）。
+#      子项（monitor: { ... }）：
+#        enabled: 总开关（默认 true）
+#        intervalMs: 心跳间隔毫秒（默认 3000）
+#        idleMs: 空闲退避后的间隔毫秒（默认 10000）
+#        sampleIntervalMs: 单次采样的两次 FFI 差分间隔（默认 500）
+#        maxSamples: 样本环形上限（默认 20000，约 16 小时 @3s）
+#        keepRaw: 是否保留原始全量进程行（默认 false，只落摘要行）
+#        detect: 传给检出器的阈值覆盖（hotCpuPct/hotStreak/memGrowthMbPerMin/
+#                memStreak/ioStormMbPerTick/stallTicks/cooldownMs）
+#        dir: 监控数据目录覆盖（默认 <dshHome>/data/efficiency/monitor）
+#  diagnose: v0.9.0 分级诊断与修复提示词（默认 true）。
+#      P0 宿主/加载器确定的失败｜P1 本机可修且证据充分｜P2 需推断或影响面小｜
+#      P3 **不是本机该修的**（供应商限流/配额/断流/网络，实测占全部错误近一半）。
+#      fixprompt 生成的提示词只含 P0–P2，P3 单独标注「不要修」。
 - insert:
-    - id: dsh-capability-aware
-      name: dsh-capability-aware
+    - id: dsh-efficiency
+      name: dsh-efficiency
       config:
         scanOnBoot: true
         scanDelayMs: 3000
@@ -56,3 +82,5 @@
         provisionAgentsPointer: false
         promptSection: true
         ledger: true
+        monitor: true
+        diagnose: true

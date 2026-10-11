@@ -1,9 +1,9 @@
-// dsh-capability-aware · 验收测试（node --test，零外部依赖）
+// dsh-efficiency · 验收测试（node --test，零外部依赖）
 // 验收标准：
 //  A. 给定用户请求 → 返回匹配能力及调用方式
 //  B. 移除某能力后 → 检测缺失并给出针对性补足引导
 //  C. 边界：空/未初始化清单、模糊需求、多候选澄清
-// 隔离：全部走 DSH_CAP_DSH_HOME / DSH_CAP_FILE 指向临时 fixture，不碰真实 ~/.dsh。
+// 隔离：全部走 DSH_EFF_DSH_HOME / DSH_EFF_FILE 指向临时 fixture，不碰真实 ~/.dsh。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,9 +20,9 @@ function mkTmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'dshcap-'));
 }
 
-// 独立加载（直接 import 模块；scanner 的 homeDsh() 读 DSH_CAP_DSH_HOME 环境变量）
+// 独立加载（直接 import 模块；scanner 的 homeDsh() 读 DSH_EFF_DSH_HOME 环境变量）
 // ⚠ node:test 同进程共享 env，这里用「先设 env 再调函数」的顺序保证隔离。
-process.env.DSH_CAP_DSH_HOME = mkTmp();
+process.env.DSH_EFF_DSH_HOME = mkTmp();
 
 const modUrl = (p) => pathToFileURL(p).href;
 const { scanAll, probeSkills, probePlugins, probeMemory, probeMcp, parseHardwareJson, parseInstalledSoftware } =
@@ -65,7 +65,7 @@ function makeFakeHome(home) {
 
 // ── T1 scanner：skills / plugins / memory 探针 ──────────────────────────
 test('scanner: 探针在真实 fixture 上 ≥1 命中（映射字段先验）', () => {
-  const home = makeFakeHome(process.env.DSH_CAP_DSH_HOME);
+  const home = makeFakeHome(process.env.DSH_EFF_DSH_HOME);
   const skills = probeSkills();
   assert.equal(skills.length, 1, `应恰好 1 条 skill，实际 ${JSON.stringify(skills)}`);
   assert.equal(skills[0].name, 'bili-subtitle');
@@ -94,7 +94,7 @@ test('scanner: 探针在真实 fixture 上 ≥1 命中（映射字段先验）',
 // ── T2 registry：落盘 + 空清单边界 ──────────────────────────────────────
 test('registry: 首次加载 → missing；空 entries → empty；scan 后 → ok', () => {
   const home = mkTmp();
-  const file = path.join(home, 'data', 'capability-aware', 'capabilities.json');
+  const file = path.join(home, 'data', 'efficiency', 'capabilities.json');
   const first = load(file);
   assert.equal(first.state, 'missing');
 
@@ -113,8 +113,8 @@ test('registry: 首次加载 → missing；空 entries → empty；scan 后 → 
 
 // ── T3 matcher：验收 A —— 匹配能力并返回调用方式 ────────────────────────
 test('matcher: 给定用户请求 → 返回匹配能力及调用方式（验收 A）', () => {
-  const home = process.env.DSH_CAP_DSH_HOME; // 已含 fake home
-  const file = path.join(home, 'data', 'capability-aware', 'capabilities.json');
+  const home = process.env.DSH_EFF_DSH_HOME; // 已含 fake home
+  const file = path.join(home, 'data', 'efficiency', 'capabilities.json');
   // 先落盘（T2 写到了自己的 tmp，这里对共享 fixture 建清单）
   applyScan(file, scanAll({}));
   const reg = load(file);
@@ -136,7 +136,7 @@ test('matcher: 给定用户请求 → 返回匹配能力及调用方式（验收
 // ── T4 matcher 边界：空清单 / 空查询 / 弱命中（缺失） ───────────────────
 test('matcher: 空清单 → empty_registry；空查询 → no_query；真缺失 → anyStrong=false', () => {
   assert.equal(match('x', []).kind, 'empty_registry');
-  const reg = load(path.join(process.env.DSH_CAP_DSH_HOME, 'data', 'capability-aware', 'capabilities.json'));
+  const reg = load(path.join(process.env.DSH_EFF_DSH_HOME, 'data', 'efficiency', 'capabilities.json'));
   assert.equal(match('', reg.entries).kind, 'no_query');
   // v5 Bug3：真缺失不再强行要求 kind=no_match（低分噪声仍会产出候选），
   // 而是要求 anyStrong=false —— 调用方据此追加缺失引导（附加式，不丢候选）。
@@ -172,8 +172,8 @@ test('matcher: 多候选且置信接近 → ambiguous + clarifications', () => {
 
 // ── T6 缺失检测（验收 B）：移除能力 → scan diff → 引导 ──────────────────
 test('guidance: 移除能力后 scan 检测缺失并给针对性引导（验收 B）', () => {
-  const home = process.env.DSH_CAP_DSH_HOME;
-  const file = path.join(home, 'data', 'capability-aware', 'capabilities.json');
+  const home = process.env.DSH_EFF_DSH_HOME;
+  const file = path.join(home, 'data', 'efficiency', 'capabilities.json');
   const before = load(file);
   const beforeCount = before.entries.length;
   assert.ok(beforeCount >= 4);
@@ -230,7 +230,7 @@ test('schema: normalizeEntry 必填校验 + manual 字段保留', async () => {
 
 // ── T9 (v3) MCP 探针：真实路径 + 真实结构 fixture + 工具目录增强 ─────────
 test('mcp: mcp_connector.json tables.connections 探针 + tool_catalog 触发面增强（v3 路径修正）', () => {
-  const home = process.env.DSH_CAP_DSH_HOME;
+  const home = process.env.DSH_EFF_DSH_HOME;
   // v3 实证真实结构：tables.connections + tables.tool_catalog
   write(
     path.join(home, 'storages', 'mcp_connector.json'),
@@ -365,7 +365,7 @@ test('matcher+guidance: 硬件/软件条目可被检索，缺失时按类型引�
 });
 
 // ── T13 (v4) host 半：RPC 路由真实接线（stub ctx，验「register 被调用 + handler 返回真数据」）──
-test('host: apply() 经 ctx.inject 软注入注册 /api/capability-aware/* 且 handler 可返回数据', async () => {
+test('host: apply() 经 ctx.inject 软注入注册 /api/efficiency/* 且 handler 可返回数据', async () => {
   const mod = await import(modUrl(path.join(root, 'lib', 'index.js')));
   assert.equal(typeof mod.apply, 'function');
   assert.ok(!('inject' in mod), '不得硬声明 inject（会让无 webServer 的 profile 整体 pending）');
@@ -384,18 +384,30 @@ test('host: apply() 经 ctx.inject 软注入注册 /api/capability-aware/* 且 h
   };
   mod.apply(ctx, { scanOnBoot: false, watch: true, periodicMs: 0, scanDelayMs: 0 });
 
-  assert.deepEqual(injected.sort(), ['systemPrompt', 'tools', 'webServer'], '应以软注入方式请求 systemPrompt 与 webServer 与 tools');
+  // 同样用集合断言：v0.9.0 起 ledger / monitor / efficiency-section 各自软注入
+  // 所需服务（systemPrompt、webServer 会被多次请求），注入**次数**不稳定，
+  // 但「三个面都必须出现」是硬要求——缺任一即真回归。
+  const injectedSet = new Set(injected);
+  for (const dep of ['systemPrompt', 'tools', 'webServer']) {
+    assert.ok(injectedSet.has(dep), `必须软注入 ${dep}；实际 ${JSON.stringify([...injectedSet])}`);
+  }
   const paths = registered.map((r) => r.path).sort();
-  assert.deepEqual(
-    paths,
-    [
-      '/api/capability-aware/doctor',
-      '/api/capability-aware/guide',
-      '/api/capability-aware/list',
-      '/api/capability-aware/query',
-      '/api/capability-aware/scan',
-    ],
-    `应注册 5 条路由，实际 ${JSON.stringify(paths)}`,
+  // 断言「核心 5 条必须都在」而非「恰好 5 条」：v0.9.0 起 monitor / ledger 子模块
+  // 各自注册自己的路由（真实装配下共 14+ 条），写死总数会随每次新增子模块误报——
+  // 那是测试脆弱，不是功能回归。核心路由缺失才是真回归，故用子集断言。
+  const CORE = [
+    '/api/efficiency/doctor',
+    '/api/efficiency/guide',
+    '/api/efficiency/list',
+    '/api/efficiency/query',
+    '/api/efficiency/scan',
+  ];
+  for (const p of CORE) {
+    assert.ok(paths.includes(p), `核心路由 ${p} 必须注册；实际 ${JSON.stringify(paths)}`);
+  }
+  assert.ok(
+    paths.every((p) => p.startsWith('/api/efficiency/')),
+    `所有路由必须落在 /api/efficiency/ 命名空间下（改名完整性）；实际 ${JSON.stringify(paths)}`,
   );
   assert.ok(registered.every((r) => r.kind === 'exact'), '全部 kind=exact');
   assert.ok(effects.some((l) => l.includes('watchers')), 'watch=true 时应挂监听 effect');
@@ -417,7 +429,7 @@ test('host: apply() 经 ctx.inject 软注入注册 /api/capability-aware/* 且 h
     });
     return req;
   };
-  await listRoute.handler(mockReq('/api/capability-aware/list', {}), res);
+  await listRoute.handler(mockReq('/api/efficiency/list', {}), res);
   await new Promise((r) => setTimeout(r, 20)); // 等异步 handler 写完（handler 内部不 await 返回）
   assert.equal(res.code, 200, 'handler 应返回 200');
   assert.ok(Array.isArray(res.body.entries), 'handler 应返回 entries 数组');
@@ -426,7 +438,7 @@ test('host: apply() 经 ctx.inject 软注入注册 /api/capability-aware/* 且 h
   // 再验 /query 的 handler 真能走检索链路（空查询 → no_query）
   const qRoute = registered.find((r) => r.path.endsWith('/query'));
   const res2 = { code: null, body: null, writeHead(c) { this.code = c; }, end(s) { this.body = s ? JSON.parse(s) : null; } };
-  await qRoute.handler(mockReq('/api/capability-aware/query', { query: '' }), res2);
+  await qRoute.handler(mockReq('/api/efficiency/query', { query: '' }), res2);
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(res2.code, 200);
   assert.ok(['no_query', 'empty_registry', 'no_match', 'ok', 'ambiguous'].includes(res2.body.kind), `query handler 应返回合法 kind，实际 ${res2.body.kind}`);
@@ -435,9 +447,9 @@ test('host: apply() 经 ctx.inject 软注入注册 /api/capability-aware/* 且 h
 // ── T17 (v4.2) 吸收 skill-use-router：索引并入 + 目录扫描去重 + 权威归口 ──
 test('skill-router: 索引被吸收、目录扫描去重、权威归口指向 skill-use-router', async () => {
   const { probeSkillRouter, probeSkills, scanAll } = await import(modUrl(path.join(root, 'lib', 'scanner.js')));
-  const prevHome = process.env.DSH_CAP_DSH_HOME;
+  const prevHome = process.env.DSH_EFF_DSH_HOME;
   const home = mkTmp();
-  process.env.DSH_CAP_DSH_HOME = home;
+  process.env.DSH_EFF_DSH_HOME = home;
   try {
     // 路由器索引：2 条（其一为子技能、其一已禁用）
     write(
@@ -481,15 +493,15 @@ test('skill-router: 索引被吸收、目录扫描去重、权威归口指向 sk
     const hw = scanAll({ probes: ['knowledge'] }).entries.length; // 省钱探针：只验 routerEntries 始终并入
     assert.ok(hw >= 3, 'routerEntries 应始终并入');
   } finally {
-    process.env.DSH_CAP_DSH_HOME = prevHome;
+    process.env.DSH_EFF_DSH_HOME = prevHome;
   }
 });
 
-// ── T16 (v4) Agent 工具面：capability_query 逻辑 + 注册接线 ─────────────
-test('tool: capability_query 能返回匹配能力与调用方式；无命中给缺失引导（agent 入口）', async () => {
+// ── T16 (v4) Agent 工具面：efficiency_query 逻辑 + 注册接线 ─────────────
+test('tool: efficiency_query 能返回匹配能力与调用方式；无命中给缺失引导（agent 入口）', async () => {
   const { buildCapabilityTool, TOOL_NAME, TOOL_DESCRIPTION, TOOL_PARAMETERS } =
     await import(modUrl(path.join(root, 'lib', 'tool.js')));
-  assert.equal(TOOL_NAME, 'capability_query');
+  assert.equal(TOOL_NAME, 'efficiency_query');
   assert.ok(TOOL_DESCRIPTION.includes('当你不确定'), 'description 必须双说「做什么 + 何时用」');
   assert.equal(TOOL_PARAMETERS.query.required, true, 'query 为必填参数');
   // 锁死 DSH 语法坑：可选参数不得写 required:false（写了 defineTool 抛 JsonSchemaError，
@@ -498,7 +510,7 @@ test('tool: capability_query 能返回匹配能力与调用方式；无命中给
 
   // 造 fixture 清单
   const home = mkTmp();
-  const file = path.join(home, 'data', 'capability-aware', 'capabilities.json');
+  const file = path.join(home, 'data', 'efficiency', 'capabilities.json');
   applyScan(file, {
     scannedAt: new Date().toISOString(), probeErrors: [], dshHome: home,
     entries: [
@@ -556,7 +568,14 @@ test('host: apply() 同时软注入 tools 与 webServer（agent 入口 + RPC 入
   };
   mod.apply(ctx, { scanOnBoot: false, watch: false, periodicMs: 0 });
   // v0.7.0 起常驻指令面也要软注入 systemPrompt → 三面齐备（指令面/工具面/RPC 面）。
-  assert.deepEqual(injected.sort(), ['systemPrompt', 'tools', 'webServer'], `应软注入 systemPrompt 与 tools 与 webServer，实际 ${injected}`);
+  // v0.8.0/v0.9.0 起账本与监控各自也软注入 webServer（各自一套 RPC），
+  // 账本还注入 tools（error_ledger_query）；效率段再注入一个 systemPrompt。
+  // ⇒ 注入次数不再固定，但**三个面必须都存在**。故断言集合而非数组（原 deepEqual
+  //   会随每次新增子模块而误报，那是测试脆弱而非功能回归）。
+  const faces = new Set(injected);
+  for (const face of ['systemPrompt', 'tools', 'webServer']) {
+    assert.ok(faces.has(face), `应软注入 ${face}，实际注入 ${injected}`);
+  }
   // 注：本仓库环境无 @deepseek-ai/dsh-tools，动态 import 会走 .catch 降级——
   // 这正是设计意图（宿主包不可用时工具面降级，CLI/RPC 不受影响），故此处不断言工具注册成功。
 });
@@ -564,7 +583,7 @@ test('host: apply() 同时软注入 tools 与 webServer（agent 入口 + RPC 入
 // ── T15 (v4) 轻量扫描必须保留 hardware/software（真实回归：total 125 → 10）──
 test('registry: preserveTypes 让部分探针扫描保留未覆盖类型条目', () => {
   const home = mkTmp();
-  const file = path.join(home, 'data', 'capability-aware', 'capabilities.json');
+  const file = path.join(home, 'data', 'efficiency', 'capabilities.json');
   // 第一轮：全量（含 hardware/software 类型）
   const full = {
     scannedAt: new Date().toISOString(), probeErrors: [], dshHome: home,
@@ -749,10 +768,10 @@ test('v5 Bug3: queryStrength 区分真命中与噪声榜首', async () => {
 });
 
 // ── T19 (v5 Bug4) tool 路径必须与 CLI 路径同分（旧实现漏传 idf） ───────
-test('v5 Bug4: capability_query 与 CLI 走同一打分（idf 已接通，不得退化为常数权重）', async () => {
+test('v5 Bug4: efficiency_query 与 CLI 走同一打分（idf 已接通，不得退化为常数权重）', async () => {
   const { buildCapabilityTool } = await import(modUrl(path.join(root, 'lib', 'tool.js')));
   const { match: m2, idfFor: idf2 } = await import(modUrl(path.join(root, 'lib', 'matcher.js')));
-  const reg = load(path.join(process.env.DSH_CAP_DSH_HOME, 'data', 'capability-aware', 'capabilities.json'));
+  const reg = load(path.join(process.env.DSH_EFF_DSH_HOME, 'data', 'efficiency', 'capabilities.json'));
   if (reg.state !== 'ok') return; // 无真实清单时跳过（隔离 fixture 下常见）
   const q = '查A股历史行情数据';
   const viaMatch = m2(q, reg.entries, { topK: 5, idf: idf2(reg.entries) });
@@ -850,7 +869,7 @@ test('v5 Bug3: 弱命中时保留候选并附缺失提示（附加式，不误�
   const { buildCapabilityTool } = await import(modUrl(path.join(root, 'lib', 'tool.js')));
   const tool = buildCapabilityTool({});
   // 用一个几乎不可能命中的查询：候选取自真实清单时 anyStrong 应为 false 且带提示
-  const reg = load(path.join(process.env.DSH_CAP_DSH_HOME, 'data', 'capability-aware', 'capabilities.json'));
+  const reg = load(path.join(process.env.DSH_EFF_DSH_HOME, 'data', 'efficiency', 'capabilities.json'));
   if (reg.state !== 'ok') return;
   const out = await tool.execute({ query: '量子纠错拓扑码编译器的表面码解码器调优' });
   // 不抛错即可，且若给出提示必须仍保留「匹配到/命中」候选行
@@ -933,14 +952,14 @@ test('v0.6.1 Bug7: 真实 fs.watch —— whale.json 不触发扫描，mcp_conne
   }
 });
 
-// ── T27 (v0.6.1) 工具优先：供给文本必须把 capability_query 摆在 CLI 之前 ──
-test('v0.6.1: AGENTS 块与技能正文均「工具优先」（capability_query 先于 cap.mjs）', async () => {
+// ── T27 (v0.6.1) 工具优先：供给文本必须把 efficiency_query 摆在 CLI 之前 ──
+test('v0.6.1: AGENTS 块与技能正文均「工具优先」（efficiency_query 先于 cap.mjs）', async () => {
   const { skillBody, provisionAgentsPointer, provisionSkill } = await import(modUrl(path.join(root, 'lib', 'provision.js')));
   const body = skillBody('9.9.9', 'D:/pd');
-  const tq = body.indexOf('capability_query');
+  const tq = body.indexOf('efficiency_query');
   const tc = body.indexOf('cap.mjs');
-  assert.ok(tq > -1, '技能正文必须提到 capability_query 工具');
-  assert.ok(tq < tc, `技能正文须工具优先（capability_query@${tq} 应早于 cap.mjs@${tc}）`);
+  assert.ok(tq > -1, '技能正文必须提到 efficiency_query 工具');
+  assert.ok(tq < tc, `技能正文须工具优先（efficiency_query@${tq} 应早于 cap.mjs@${tc}）`);
   assert.ok(/首选/.test(body), '技能正文须标注「首选」');
   assert.ok(/兜底/.test(body), '技能正文须保留 CLI 兜底入口');
 
@@ -949,10 +968,10 @@ test('v0.6.1: AGENTS 块与技能正文均「工具优先」（capability_query 
     const home = path.join(tmp, 'dsh');
     provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
     const t = await fs.promises.readFile(path.join(home, 'AGENTS.md'), 'utf8');
-    const aq = t.indexOf('capability_query');
+    const aq = t.indexOf('efficiency_query');
     const ac = t.indexOf('cap.mjs');
-    assert.ok(aq > -1, 'AGENTS 块必须提到 capability_query 工具');
-    assert.ok(aq < ac, `AGENTS 块须工具优先（capability_query@${aq} 应早于 cap.mjs@${ac}）`);
+    assert.ok(aq > -1, 'AGENTS 块必须提到 efficiency_query 工具');
+    assert.ok(aq < ac, `AGENTS 块须工具优先（efficiency_query@${aq} 应早于 cap.mjs@${ac}）`);
     assert.ok(/缺失|补足建议/.test(t), 'AGENTS 块须说明弱命中/缺失引导');
     // 幂等性与既有契约不回归
     const r2 = provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
@@ -979,15 +998,15 @@ test('v0.7.0: promptSectionText 含行为规约、工具名与权威归属', asy
   const { promptSectionText, SECTION_NAME, SECTION_ORDER } = await import(modUrl(path.join(root, 'lib', 'prompt-section.js')));
   const t = promptSectionText('9.9.9');
   assert.ok(t.includes('9.9.9'), '正文须带版本戳（便于排查活体跑的是哪版）');
-  assert.ok(t.includes('capability_query'), '正文必须点名 capability_query 工具');
+  assert.ok(t.includes('efficiency_query'), '正文必须点名 efficiency_query 工具');
   assert.ok(/起手先调/.test(t), '正文必须给出可执行的触发规约，而非泛泛介绍');
   assert.ok(/skill-use-router|skill_index\.py/.test(t), '正文须给出权威归属（技能路由）');
   assert.ok(/memory_search/.test(t), '正文须给出权威归属（记忆）');
   assert.ok(/cap\.mjs/.test(t), '正文须保留 CLI 兜底入口');
-  const tq = t.indexOf('capability_query');
+  const tq = t.indexOf('efficiency_query');
   const tc = t.indexOf('cap.mjs');
-  assert.ok(tq < tc, '正文须工具优先（capability_query 早于 cap.mjs）');
-  assert.equal(SECTION_NAME, 'capability-aware:capability-index');
+  assert.ok(tq < tc, '正文须工具优先（efficiency_query 早于 cap.mjs）');
+  assert.equal(SECTION_NAME, 'efficiency:capability-index');
   // 位次须避开既有槽位（SECTION_ORDERS: TOOL_REPORT=2900, TOOL_COMPUTER_USE=3000）
   assert.ok(SECTION_ORDER > 2900 && SECTION_ORDER < 3000, `order(${SECTION_ORDER}) 须落在 2900..3000 空档`);
 });
@@ -1019,7 +1038,7 @@ test('v0.7.0: mountPromptSection 经 ctx.inject 软注入并注册 section', asy
   assert.equal(s.order, 2950, 'order 应取宿主集中的 TOOL_COMPUTER_USE(3000) 之前空档');
   assert.equal(s.interpolate, false);
   assert.equal(typeof s.text, 'function', 'text 支持函数形态（随 scope 动态求值，对照 dsh-mcp-resources）');
-  assert.ok(String(s.text({})).includes('capability_query'));
+  assert.ok(String(s.text({})).includes('efficiency_query'));
   assert.equal(effects.length, 1, '注册必须挂在 effect 内，避免热重载重复注册抛错');
   // 可关闭
   const off = mountPromptSection(fakeCtx, { enabled: false });
@@ -1074,7 +1093,7 @@ test('v0.7.0: index.js 接线系统提示词段且默认开启（安装即得）
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// v0.8.0 错误账本并入（用户 m05633 裁决：「做进 dsh-capability-aware 里面，
+// v0.8.0 错误账本并入（用户 m05633 裁决：「做进 dsh-efficiency 里面，
 // 不是新开一个插件」）。以下为**接线级**断言：主插件必须真的把账本挂起来，
 // 而不是把 lib/ledger/ 当死代码放在仓库里。
 // ════════════════════════════════════════════════════════════════════════
@@ -1089,7 +1108,7 @@ test('v0.8.0: index.js 接线错误账本且默认开启', async () => {
   assert.ok(/apply\.__ledger\s*=/.test(idx), '账本句柄应暴露给 CLI/测试');
 });
 
-// T32 装配级：apply() 用最小 fake ctx 真跑，账本三面齐备且 RPC 前缀归 capability-aware
+// T32 装配级：apply() 用最小 fake ctx 真跑，账本三面齐备且 RPC 前缀归 efficiency
 test('v0.8.0: apply() 真的挂起账本（RPC/工具/指令面 + 命名空间归口）', async () => {
   const mod = await import(modUrl(path.join(root, 'lib', 'index.js')));
   const { mkdtempSync } = await import('node:fs');
@@ -1118,15 +1137,15 @@ test('v0.8.0: apply() 真的挂起账本（RPC/工具/指令面 + 命名空间�
   const L = mod.apply.__ledger;
   assert.ok(L, 'apply 后必须能拿到账本句柄');
   assert.equal(L.cfg.dir, dir, '账本目录应可覆盖（测试隔离）');
-  // RPC 面归 capability-aware 命名空间，不再是独立插件的 /api/error-ledger
-  assert.ok(routes.includes('/api/capability-aware/ledger/stats'), `RPC 前缀应归口，实际 ${routes.filter((r) => r.includes('ledger')).join(',')}`);
-  assert.ok(routes.includes('/api/capability-aware/ledger/health'));
+  // RPC 面归 efficiency 命名空间，不再是独立插件的 /api/error-ledger
+  assert.ok(routes.includes('/api/efficiency/ledger/stats'), `RPC 前缀应归口，实际 ${routes.filter((r) => r.includes('ledger')).join(',')}`);
+  assert.ok(routes.includes('/api/efficiency/ledger/health'));
   assert.ok(!routes.some((r) => r.startsWith('/api/error-ledger')), '不得残留独立插件时代的 RPC 前缀');
   // 指令面两段同命名空间（能力清单 + 错误账本），互不冲突
   const { SECTION_NAME: PS_CAP } = await import(modUrl(path.join(root, 'lib', 'prompt-section.js')));
   const { SECTION_NAME: PS_ERR } = await import(modUrl(path.join(root, 'lib', 'ledger', 'prompt-section.js')));
-  assert.equal(PS_CAP, 'capability-aware:capability-index');
-  assert.equal(PS_ERR, 'capability-aware:error-index', '账本段必须与能力段同命名空间');
+  assert.equal(PS_CAP, 'efficiency:capability-index');
+  assert.equal(PS_ERR, 'efficiency:error-index', '账本段必须与能力段同命名空间');
   // 三面齐备
   assert.ok(injected.includes('systemPrompt') && injected.includes('tools') && injected.includes('webServer'), `软注入面缺失：${injected}`);
 });
@@ -1158,5 +1177,105 @@ test('v0.8.0: lib/ledger/index.js 导出 mountLedger 而非 apply', async () => 
   const src = await fs.promises.readFile(new URL('../lib/ledger/index.js', import.meta.url), 'utf8');
   assert.ok(/export\s*\{[^}]*mountLedger/.test(src), '必须导出 mountLedger');
   assert.ok(!/export\s+(async\s+)?function\s+apply\s*\(/.test(src), '并入后不得再导出 apply（避免双份 RPC 路由）');
-  assert.ok(src.includes('capability-aware/ledger'), '命名空间应归口 capability-aware');
+  assert.ok(src.includes('efficiency/ledger'), '命名空间应归口 efficiency');
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// T35–T38 (v0.9.0) 旧品牌退役 —— 改名必须**主动收尾**，否则旧产物成孤儿
+// ══════════════════════════════════════════════════════════════════════
+// 背景（实测）：改名后 provisionAgentsPointer 只认新标记 `dsh-efficiency:managed:begin`，
+// 而用户 ~/.dsh/AGENTS.md 里留的是旧块 `dsh-capability-aware:managed:begin`。
+// 不做退役的话，新块会被**追加**，旧块原样留着且里面的路径已失效（指向不存在的目录）；
+// 技能目录同理——`capability-lookup` 与 `efficiency-lookup` 并存会互抢路由命中。
+
+test('v0.9.0: provisionAgentsPointer 退役旧品牌管理块（而不是再追加一块）', async () => {
+  const { provisionAgentsPointer } = await import(modUrl(path.join(root, 'lib', 'provision.js')));
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-legacy-md-'));
+  try {
+    const home = path.join(tmp, 'dsh');
+    fs.mkdirSync(home, { recursive: true });
+    const file = path.join(home, 'AGENTS.md');
+    // 造一个「用户规则文件 + 旧品牌块」的真实形态
+    fs.writeFileSync(file, [
+      '# 用户自己的规则（不得被动）',
+      '',
+      '<!-- dsh-capability-aware:managed:begin v0.6.0 — 由 dsh-capability-aware 插件维护，删除本块即停用） -->',
+      '## 能力与环境速查（自动注入）',
+      '',
+      '- 先跑 node "C:\\Users\\X\\.dsh\\profiles\\desktop\\node_modules\\dsh-capability-aware\\cap.mjs" brief "<意图>"',
+      '<!-- dsh-capability-aware:managed:end -->',
+      '',
+    ].join('\n'), 'utf8');
+
+    const r = provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    assert.equal(r.action, 'updated');
+    const t = fs.readFileSync(file, 'utf8');
+    // ① 旧块必须消失（标记与死路径都不许残留）
+    assert.ok(!t.includes('dsh-capability-aware:managed'), '旧品牌管理块必须被退役');
+    assert.ok(!t.includes('capability-aware'), '旧品牌串不得残留（含死路径）');
+    // ② 用户标记外的内容一字不动
+    assert.ok(t.includes('# 用户自己的规则（不得被动）'), '标记外内容不得被触碰');
+    // ③ 新块必须在位且唯一
+    assert.equal((t.match(/dsh-efficiency:managed:begin/g) || []).length, 1, '新块有且仅有一个');
+    assert.ok(t.includes('efficiency_query'), '新块内容应在位');
+    // ④ 幂等：再跑一次仍 unchanged，且不产生第二块
+    assert.equal(provisionAgentsPointer({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home }).action, 'unchanged');
+    assert.equal((fs.readFileSync(file, 'utf8').match(/dsh-efficiency:managed:begin/g) || []).length, 1);
+  } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
+});
+
+test('v0.9.0: retireLegacySkills 只在「证据充分」时删除旧技能目录', async () => {
+  const { retireLegacySkills } = await import(modUrl(path.join(root, 'lib', 'provision.js')));
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-legacy-skill-'));
+  try {
+    const home = path.join(tmp, 'dsh');
+    // ① 本插件旧版写的（含旧品牌串）→ 必须删
+    const ours = path.join(home, 'skills', 'capability-lookup');
+    fs.mkdirSync(ours, { recursive: true });
+    fs.writeFileSync(path.join(ours, 'SKILL.md'), '# 本机能力与环境速查\n> 由 `dsh-capability-aware` 插件自动供给\n', 'utf8');
+    // ② 用户自建的同名目录（内容不含旧品牌）→ 绝不删（另有用例覆盖，这里只留证）
+    const out1 = retireLegacySkills({ dshHome: home });
+    const rec = out1.find((x) => x.path === ours);
+    assert.equal(rec.action, 'removed', '含旧品牌串的旧技能目录应被退役');
+    assert.equal(fs.existsSync(ours), false, '目录必须真的消失');
+    // ③ 不存在时返回 absent（幂等，不抛）
+    const out2 = retireLegacySkills({ dshHome: home });
+    assert.equal(out2.find((x) => x.path === ours).action, 'absent');
+  } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
+});
+
+test('v0.9.0: retireLegacySkills 对「同名但非本插件所写」的目录保留不删', async () => {
+  const { retireLegacySkills } = await import(modUrl(path.join(root, 'lib', 'provision.js')));
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-legacy-keep-'));
+  try {
+    const home = path.join(tmp, 'dsh');
+    const dir = path.join(home, 'skills', 'capability-lookup');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '# 我自己写的技能，碰巧同名\n没什么特别的。\n', 'utf8');
+    const out = retireLegacySkills({ dshHome: home });
+    assert.equal(out.find((x) => x.path === dir).action, 'kept-foreign');
+    assert.equal(fs.existsSync(dir), true, '证据不足时绝不误删用户技能');
+  } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
+});
+
+test('v0.9.0: provisionSkill 默认顺带退役旧技能目录（可 retireLegacy:false 关）', async () => {
+  const { provisionSkill } = await import(modUrl(path.join(root, 'lib', 'provision.js')));
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cap-legacy-prov-'));
+  try {
+    const home = path.join(tmp, 'dsh');
+    const old = path.join(home, 'skills', 'capability-lookup');
+    fs.mkdirSync(old, { recursive: true });
+    fs.writeFileSync(path.join(old, 'SKILL.md'), 'dsh-capability-aware\n', 'utf8');
+    provisionSkill({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home });
+    assert.equal(fs.existsSync(old), false, '默认应退役旧目录');
+    assert.ok(fs.existsSync(path.join(home, 'skills', 'efficiency-lookup', 'SKILL.md')), '新技能必须在位');
+
+    // retireLegacy:false 时不动旧目录
+    const home2 = path.join(tmp, 'dsh2');
+    const old2 = path.join(home2, 'skills', 'capability-lookup');
+    fs.mkdirSync(old2, { recursive: true });
+    fs.writeFileSync(path.join(old2, 'SKILL.md'), 'dsh-capability-aware\n', 'utf8');
+    provisionSkill({ version: '9.9.9', pluginDir: 'D:/pd', dshHome: home2, retireLegacy: false });
+    assert.equal(fs.existsSync(old2), true, 'retireLegacy:false 时应保留');
+  } finally { await fs.promises.rm(tmp, { recursive: true, force: true }); }
 });

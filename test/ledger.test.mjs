@@ -1,4 +1,4 @@
-// dsh-capability-aware · lib/ledger 错误账本验收测试（node --test，零外部依赖）
+// dsh-efficiency · lib/ledger 错误账本验收测试（node --test，零外部依赖）
 //
 // 验收标准（对应用户 m04583 原话）：
 //  A. 记录每个会话的报错信息        → T10–T16, T25–T30
@@ -6,7 +6,7 @@
 //  C. 以备后续自修复与自进化        → T20（只给候选、只收 owner=local）
 //  D. 不碰用户文件、只读会话日志     → T29（源码级）
 //
-// 归属（用户 m05633 裁决）：账本并入 dsh-capability-aware，不再独立成插件——
+// 归属（用户 m05633 裁决）：账本并入 dsh-efficiency，不再独立成插件——
 // 「本机有什么能力」与「什么坏了 / 缺什么」是同一问题的两面。
 // 因此本测试直接测 lib/ledger/*，并额外断言主插件 apply() 确实把它挂起来了。
 //
@@ -330,18 +330,18 @@ test('T26 store：空账本不抛错，返回 existed=false', async () => {
   assert.deepEqual(r, { records: [], badLines: 0, existed: false });
 });
 
-test('T27 store：账本目录口径 DSH_ERROR_LEDGER_HOME > DSH_CAP_DSH_HOME > ~/.dsh，落 data/capability-aware/ledger', () => {
-  const saved = { a: process.env.DSH_ERROR_LEDGER_HOME, c: process.env.DSH_CAP_DSH_HOME };
+test('T27 store：账本目录口径 DSH_ERROR_LEDGER_HOME > DSH_EFF_DSH_HOME > ~/.dsh，落 data/efficiency/ledger', () => {
+  const saved = { a: process.env.DSH_ERROR_LEDGER_HOME, c: process.env.DSH_EFF_DSH_HOME };
   try {
     delete process.env.DSH_ERROR_LEDGER_HOME;
-    delete process.env.DSH_CAP_DSH_HOME;
-    assert.ok(store.ledgerDir().endsWith(path.join('.dsh', 'data', 'capability-aware', 'ledger')));
-    process.env.DSH_CAP_DSH_HOME = 'X:\\cap';
-    assert.equal(store.ledgerDir(), path.join('X:\\cap', 'data', 'capability-aware', 'ledger'));
+    delete process.env.DSH_EFF_DSH_HOME;
+    assert.ok(store.ledgerDir().endsWith(path.join('.dsh', 'data', 'efficiency', 'ledger')));
+    process.env.DSH_EFF_DSH_HOME = 'X:\\cap';
+    assert.equal(store.ledgerDir(), path.join('X:\\cap', 'data', 'efficiency', 'ledger'));
     process.env.DSH_ERROR_LEDGER_HOME = 'X:\\explicit';
     assert.equal(store.ledgerDir(), 'X:\\explicit');
   } finally {
-    for (const [k, v] of Object.entries({ DSH_ERROR_LEDGER_HOME: saved.a, DSH_CAP_DSH_HOME: saved.c })) {
+    for (const [k, v] of Object.entries({ DSH_ERROR_LEDGER_HOME: saved.a, DSH_EFF_DSH_HOME: saved.c })) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
   }
@@ -571,12 +571,12 @@ test('T43 backfill：会话根不存在时安静返回空结果', async () => {
 });
 
 test('T44 sessionsRoot：随 DSH_HOME 口径变化', () => {
-  const saved = { b: process.env.DSH_CAP_DSH_HOME };
+  const saved = { b: process.env.DSH_EFF_DSH_HOME };
   try {
-    process.env.DSH_CAP_DSH_HOME = 'X:\\home';
+    process.env.DSH_EFF_DSH_HOME = 'X:\\home';
     assert.equal(sessionsRoot(), path.join('X:\\home', 'sessions'));
   } finally {
-    if (saved.b === undefined) delete process.env.DSH_CAP_DSH_HOME; else process.env.DSH_CAP_DSH_HOME = saved.b;
+    if (saved.b === undefined) delete process.env.DSH_EFF_DSH_HOME; else process.env.DSH_EFF_DSH_HOME = saved.b;
   }
 });
 
@@ -646,11 +646,11 @@ test('T48 源码级：不硬声明 inject、不写用户文件、只读会话日
   assert.ok(!/rm\(|rmSync\(|unlink\(/.test(code), '账本插件不得删除任何文件');
 });
 
-test('T49 版本一致性：PLUGIN_VERSION 与 package.json 一致；账本归 capability-aware 命名空间', () => {
+test('T49 版本一致性：PLUGIN_VERSION 与 package.json 一致；账本归 efficiency 命名空间', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(PLUGIN_VERSION, pkg.version, '两处版本必须同步（health 会暴露实际运行版本）');
-  assert.equal(LEDGER_NAME, 'capability-aware/ledger');
-  assert.equal(LEDGER_BASE, '/api/capability-aware/ledger');
+  assert.equal(LEDGER_NAME, 'efficiency/ledger');
+  assert.equal(LEDGER_BASE, '/api/efficiency/ledger');
   assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml');
 });
 
@@ -705,7 +705,7 @@ test('T50 apply()：端到端捕获 → 落盘 → 可查询', async () => {
 
   // 三面齐备：指令面 + 工具面 + RPC 面（都不许缺席）
   assert.ok(injected.includes('systemPrompt') && injected.includes('tools') && injected.includes('webServer'), `软注入面缺失：${injected}`);
-  assert.ok(routes.includes('/api/capability-aware/ledger/stats') && routes.includes('/api/capability-aware/ledger/repair'));
+  assert.ok(routes.includes('/api/efficiency/ledger/stats') && routes.includes('/api/efficiency/ledger/repair'));
   assert.ok(effects.some((l) => l.includes('session capture')));
   assert.ok(effects.some((l) => l.includes('loader capture')));
 
@@ -788,15 +788,15 @@ test('T55 apply()：RPC handlers 真实可调用（stats / repair / recent）', 
     };
     routeMap.get(p)({ url: p, method: 'GET', on(e, cb) { if (e === 'end') cb(); } }, res);
   });
-  const stats = await call('/api/capability-aware/ledger/stats');
+  const stats = await call('/api/efficiency/ledger/stats');
   assert.equal(stats.code, 200);
   assert.equal(stats.body.captured, 1);
   assert.equal(stats.body.dir, dir);
 
-  const repair = await call('/api/capability-aware/ledger/repair');
+  const repair = await call('/api/efficiency/ledger/repair');
   assert.equal(repair.code, 200);
   assert.ok(Array.isArray(repair.body.candidates));
 
-  const recent = await call('/api/capability-aware/ledger/recent');
+  const recent = await call('/api/efficiency/ledger/recent');
   assert.equal(recent.body.records.length, 1);
 });

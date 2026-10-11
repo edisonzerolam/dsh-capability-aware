@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// dsh-capability-aware · CLI 入口（零依赖，node >= 20）
+// dsh-efficiency · CLI 入口（零依赖，node >= 20）
 // 用法：
 //   node cap.mjs scan                     # 全量扫描 + 落盘 + 打印 diff
 //   node cap.mjs list [type]              # 列出清单（可按类型过滤）
@@ -7,7 +7,7 @@
 //   node cap.mjs guide "<能力名>" [type]   # 对指定缺失能力生成补足引导
 //   node cap.mjs stale                    # 与上次快照 diff，报告消失的能力（缺失引导）
 //   node cap.mjs ledger <子命令>           # 错误账本（v0.8.0，见下）
-//   DSH_CAP_DSH_HOME=<dir> 可重定向扫描根（测试/多 profile）
+//   DSH_EFF_DSH_HOME=<dir> 可重定向扫描根（测试/多 profile）
 //
 // 错误账本子命令（与「能力清单」互补：那边查「有什么能力」，这边查「什么坏了」）：
 //   node cap.mjs ledger backfill [--force] [--workspace=] [--max-files=N] [--concurrency=N]
@@ -18,6 +18,10 @@
 //   node cap.mjs ledger search "<词>" [N]
 //   node cap.mjs ledger report [--since=]
 //   node cap.mjs ledger export [--out=f.json]
+//   node cap.mjs interface [kind]         # 接口面（v0.9.0：service/remote/slot/row/route）
+//   node cap.mjs monitor [--watch] [--json] [--selfcheck]   # 资源监控（v0.9.0）
+//   node cap.mjs diagnose [--min=N] [--severity=P0]         # 分级诊断（v0.9.0）
+//   node cap.mjs fixprompt [--out=f.md]                     # 修复提示词（v0.9.0）
 
 import { scanAll } from './lib/scanner.js';
 import { load, applyScan } from './lib/registry.js';
@@ -37,7 +41,7 @@ function printJson(v) {
   console.log(JSON.stringify(v, null, 2));
 }
 
-const file = process.env.DSH_CAP_FILE || undefined;
+const file = process.env.DSH_EFF_FILE || undefined;
 
 // query/stale 前统一构造 idf：**每次现算**。
 // ⚠ 不用落盘的 meta.idf——它是 scan 时刻的快照，alias 灌入/条目修改后会过期，
@@ -79,7 +83,7 @@ function aliasCmd(rest) {
 
 switch (cmd) {
   case 'scan': {
-    const scan = scanAll({ tools: process.env.DSH_CAP_TOOLS ? process.env.DSH_CAP_TOOLS.split(',') : undefined });
+    const scan = scanAll({ tools: process.env.DSH_EFF_TOOLS ? process.env.DSH_EFF_TOOLS.split(',') : undefined });
     const res = applyScan(file, scan);
     printJson({
       state: res.state,
@@ -117,7 +121,7 @@ switch (cmd) {
       process.exit(2);
     }
     // v2：detail=full 输出全条目（默认摘要档，MCP Progressive Discovery 口径）
-    const detailFull = process.argv.includes('--detail=full') || process.env.DSH_CAP_DETAIL === 'full';
+    const detailFull = process.argv.includes('--detail=full') || process.env.DSH_EFF_DETAIL === 'full';
     const m = match(q, reg.entries, { idf: idfFor(reg) });
     if (!detailFull && (m.kind === 'ok' || m.kind === 'ambiguous')) {
       const slim = {
@@ -160,7 +164,7 @@ switch (cmd) {
       ? (() => { const m = match(q, reg.entries, { idf: idfFor(reg), topK: 5 });
                  return m.kind === 'ok' || m.kind === 'ambiguous' ? m.candidates : []; })()
       : reg.entries;
-    // v4.4：与工具 capability_query 共用 lib/brief.js（口径单一事实源）
+    // v4.4：与工具 efficiency_query 共用 lib/brief.js（口径单一事实源）
     const lines = briefLines(picked);
     const ah = checkAuthorities();
     console.log(lines.join('\n') + `\n— ${picked.length} 条 ｜ ${ah.summary}`);
@@ -197,14 +201,43 @@ switch (cmd) {
     });
     break;
   }
+  case 'interface':
+  case 'iface': {
+    interfaceCmd(rest).catch((e) => {
+      printJson({ ok: false, error: String(e?.message ?? e) });
+      process.exit(1);
+    });
+    break;
+  }
+  case 'monitor': {
+    monitorCmd(rest).catch((e) => {
+      printJson({ ok: false, error: String(e?.message ?? e) });
+      process.exit(1);
+    });
+    break;
+  }
+  case 'diagnose': {
+    diagnoseCmd(rest).catch((e) => {
+      printJson({ ok: false, error: String(e?.message ?? e) });
+      process.exit(1);
+    });
+    break;
+  }
+  case 'fixprompt': {
+    fixpromptCmd(rest).catch((e) => {
+      printJson({ ok: false, error: String(e?.message ?? e) });
+      process.exit(1);
+    });
+    break;
+  }
   default:
-    console.error('用法: node cap.mjs <scan|list|query|doctor|guide|stale|alias|brief|ledger> [args]');
+    console.error('用法: node cap.mjs <scan|list|query|doctor|guide|stale|alias|brief|ledger|interface|monitor|diagnose|fixprompt> [args]');
     process.exit(1);
 }
 
 // ── v0.8.0 错误账本子命令 ────────────────────────────────────────
 // 与「能力清单」互补：那边查「有什么能力」，这边查「什么坏了 / 缺什么」。
-// 账本默认落在 ~/.dsh/data/capability-aware/ledger/（可用 DSH_ERROR_LEDGER_HOME 覆盖）。
+// 账本默认落在 ~/.dsh/data/efficiency/ledger/（可用 DSH_ERROR_LEDGER_HOME 覆盖）。
 function ledgerFlags(rest) {
   const flags = { positional: [] };
   for (const a of rest) {
@@ -363,4 +396,237 @@ async function ledgerCmd(rest) {
 
   printJson({ ok: false, message: `未知账本子命令「${sub}」。可用：backfill|stats|recent|facets|repair|search|report|export` });
   process.exit(1);
+}
+
+// ── v0.9.0 接口面子命令（目标 1：为其他插件高效工作提供支持） ──────────
+// 与「能力清单」的区别：清单的受众是 **agent**（我该用什么），
+// 接口面的受众是 **插件作者**（我能调用什么宿主 API）。
+async function interfaceCmd(rest) {
+  const flags = ledgerFlags(rest);
+  const kind = typeof flags.positional[0] === 'string' ? flags.positional[0] : '';
+  const { scanInterfaces, interfacesToEntries } = await import('./lib/interfaces.js');
+  const scan = scanInterfaces({});
+  const entries = interfacesToEntries(scan);
+
+  if (flags.json === true || flags.json === 'true') {
+    printJson({ ...scan, entryCount: entries.length });
+    return;
+  }
+
+  const KINDS = ['service', 'remote', 'slot', 'row', 'route'];
+  const want = kind && KINDS.includes(kind) ? kind : '';
+
+  console.log(`接口面索引（宿主 node_modules: ${scan.sources.hostNodeModules ?? '未找到'}）`);
+  console.log(`总计 ${entries.length} 条：service=${scan.services.length} remote=${scan.remotes.length} slot=${scan.slots.length} row=${scan.rows.length}\n`);
+
+  if (!want || want === 'service') {
+    console.log(`【service】Cordis 服务 ${scan.services.length} 条（available 需在宿主内运行才有真值）`);
+    for (const s of scan.services) {
+      const av = s.available === null ? '?' : s.available ? '✓' : '✗';
+      console.log(`  ${av} ${s.name.padEnd(20)} ${s.note}`);
+      console.log(`      ${oneLine(s.how, 140)}`);
+    }
+    console.log('');
+  }
+  if (!want || want === 'remote') {
+    console.log(`【remote】Typert Remote 方法 ${scan.remotes.length} 条`);
+    const bySvc = new Map();
+    for (const r of scan.remotes) {
+      if (!bySvc.has(r.service)) bySvc.set(r.service, []);
+      bySvc.get(r.service).push(r);
+    }
+    for (const [svc, list] of [...bySvc.entries()].sort((a, b) => b[1].length - a[1].length)) {
+      console.log(`  ${svc}  (${list.length})  ← ${list[0].pkg}`);
+      for (const r of list.slice(0, 8)) {
+        console.log(`      ${r.method}(${r.params.join(', ')})`);
+      }
+      if (list.length > 8) console.log(`      … 另有 ${list.length - 8} 个方法`);
+    }
+    console.log('');
+  }
+  if (!want || want === 'slot') {
+    console.log(`【slot】客户端 UI 插槽 ${scan.slots.length} 条`);
+    for (const s of scan.slots) {
+      console.log(`  ${s.id.padEnd(38)} ${s.usedBy.length ? `已被 ${s.usedBy.slice(0, 4).join(', ')} 使用` : '（未发现消费者，可能仍可用）'}`);
+    }
+    console.log('');
+  }
+  if (!want || want === 'row') {
+    console.log(`【row】宿主 bundle 登记项 ${scan.rows.length} 条（id = name）`);
+    const byBundle = new Map();
+    for (const r of scan.rows) {
+      if (!byBundle.has(r.bundle)) byBundle.set(r.bundle, []);
+      byBundle.get(r.bundle).push(r);
+    }
+    for (const [b, list] of byBundle) {
+      console.log(`  [${b}] ${list.length} 项，前 20：`);
+      for (const r of list.slice(0, 20)) console.log(`      ${r.id.padEnd(32)} = ${r.name}`);
+    }
+    console.log('');
+  }
+  if (!want || want === 'route') {
+    const routes = entries.filter((e) => e.iface?.kind === 'route');
+    console.log(`【route】已知 HTTP 路由前缀 ${routes.length} 条`);
+    for (const r of routes) console.log(`  ${r.name}  ${r.description}`);
+    console.log('');
+  }
+
+  if (!kind) console.log('提示：node cap.mjs interface <service|remote|slot|row|route> 只看一类；--json 出完整数据。');
+}
+
+// ── v0.9.0 资源监控子命令（目标 2：监控资源调度，防范卡死/崩溃） ────────
+// 与「错误账本」的区别：账本答「什么坏了」（事后），监控答「现在跑得怎么样」（当下）。
+// 数据由插件在宿主内的心跳写入 ~/.dsh/data/efficiency/monitor/；
+// 本命令在**插件外部**读那些文件，或（--live）现采一次全机进程树。
+async function monitorCmd(rest) {
+  const flags = ledgerFlags(rest);
+  const sub = typeof flags.positional[0] === 'string' ? flags.positional[0] : 'stats';
+  const limit = Number(flags.limit) || 20;
+  const { monitorDir, readSamples, readEvents, readMeta, sampleFileSize } = await import('./lib/monitor/store.js');
+
+  // --live：不依赖宿主心跳，直接现采一次（CLI 独立可用，这是「插件外也能用」的关键）
+  if (flags.live === true || flags.live === 'true') {
+    const { sampleAll } = await import('./lib/monitor/procs.js');
+    const s = await sampleAll({ intervalMs: Number(flags.interval) || 500 });
+    if (flags.json === true || flags.json === 'true') { printJson(s); return; }
+    console.log(`实时采样（source=${s.source}，窗口 ${s.wallMs}ms，${s.rows.length} 进程，共 ${s.totalWorkingSetMB}MB）`);
+    if (s.note) console.log(`  注：${s.note}`);
+    const rows = s.rows.slice().sort((a, b) => (b.cpuPct ?? -1) - (a.cpuPct ?? -1));
+    for (const r of rows.slice(0, limit)) {
+      console.log(`  pid=${String(r.pid).padEnd(7)} ${String(r.kind).padEnd(11)} cpu=${String(r.cpuPct ?? '?').padStart(7)}%  ws=${String(r.workingSetMB ?? '?').padStart(8)}MB  ${oneLine(r.name, 40)}`);
+    }
+    return;
+  }
+
+  const dir = typeof flags.dir === 'string' ? flags.dir : monitorDir();
+  const meta = await readMeta(dir);
+  const sampleBytes = await sampleFileSize(dir);
+
+  if (sub === 'stats' || sub === 'health') {
+    const { rows: samples } = await readSamples({ dir, limit: 500 });
+    const { events } = await readEvents({ dir, limit: 500 });
+    const out = {
+      dir,
+      sampleBytes,
+      meta,
+      recentSamples: samples.length,
+      recentEvents: events.length,
+      lastSampleTime: samples.at(-1)?.time ?? null,
+      lastEventTime: events.at(-1)?.time ?? null,
+    };
+    if (flags.json === true || flags.json === 'true') { printJson(out); return; }
+    console.log(`监控数据目录：${dir}`);
+    console.log(`  采样文件 ${(sampleBytes / 1024).toFixed(1)} KB`);
+    console.log(`  最近窗口：采样 ${samples.length} 条（至 ${fmtTime(out.lastSampleTime)}）　事件 ${events.length} 条（至 ${fmtTime(out.lastEventTime)}）`);
+    if (meta) {
+      console.log(`  元数据：version=${meta.version ?? '?'} ticks=${meta.ticks ?? '?'} startedAt=${fmtTime(meta.startedAt)}`);
+      if (meta.lastError) console.log(`  ⚠ 最近错误：${oneLine(meta.lastError, 140)}`);
+    } else {
+      console.log('  （无元数据：插件可能尚未在宿主内启动过心跳）');
+    }
+    return;
+  }
+
+  if (sub === 'samples' || sub === 'procs') {
+    const { rows: samples } = await readSamples({ dir, limit });
+    if (flags.json === true || flags.json === 'true') { printJson(samples); return; }
+    if (!samples.length) { console.log(`无采样数据（${dir}）。若插件刚装上，等一个心跳周期；或加 --live 现采。`); return; }
+    for (const s of samples) {
+      console.log(`── ${fmtTime(s.time)}　进程 ${s.procCount ?? '?'}　会话 ${s.sessionCount ?? '?'}　共 ${s.totalWorkingSetMB ?? '?'}MB`);
+      for (const p of (s.procs ?? []).slice(0, limit)) {
+        console.log(`    pid=${String(p.pid).padEnd(7)} ${String(p.kind).padEnd(11)} cpu=${String(p.cpuPct ?? '?').padStart(7)}%  ws=${String(p.workingSetMB ?? '?').padStart(8)}MB`);
+      }
+    }
+    return;
+  }
+
+  if (sub === 'sessions') {
+    const { rows: samples } = await readSamples({ dir, limit });
+    const last = samples.at(-1);
+    if (flags.json === true || flags.json === 'true') { printJson(last?.sessions ?? []); return; }
+    if (!last) { console.log(`无采样数据（${dir}）。`); return; }
+    console.log(`最近一次采样 ${fmtTime(last.time)} 的会话增量（本插件上次读取至今）：`);
+    for (const s of (last.sessions ?? []).slice(0, limit)) {
+      console.log(`  ${oneLine(s.title ?? s.id, 46)}　turns+${s.dTurns ?? 0} steps+${s.dSteps ?? 0} llm+${Math.round((s.dLlmMs ?? 0) / 1000)}s tool+${Math.round((s.dToolMs ?? 0) / 1000)}s`);
+    }
+    return;
+  }
+
+  if (sub === 'events') {
+    const { events } = await readEvents({ dir, limit });
+    if (flags.json === true || flags.json === 'true') { printJson(events); return; }
+    if (!events.length) { console.log(`无监控事件（${dir}）——这是好消息：没有触发任何异常规则。`); return; }
+    for (const e of events) {
+      console.log(`[${e.severity ?? '?'}] ${fmtTime(e.time)} ${e.code}　${e.subject ?? ''}`);
+      if (e.message) console.log(`    ${oneLine(e.message, 160)}`);
+      if (e.evidence?.reason) console.log(`    依据：${oneLine(e.evidence.reason, 140)}`);
+    }
+    return;
+  }
+
+  printJson({ ok: false, message: `未知监控子命令「${sub}」。可用：stats|procs|sessions|events|samples，或 --live 现采` });
+  process.exit(1);
+}
+
+// ── v0.9.0 分级诊断 + 修复提示词 ──────────────────────────────────
+// 读账本（+ 可选监控事件）→ 按确定性分 P0–P3 → 出信封或可粘贴的修复提示词。
+async function loadDiagnoseInputs(flags) {
+  const { ledgerDir: ld, readRecords } = await import('./lib/ledger/store.js');
+  const dir = typeof flags.ledger === 'string' ? flags.ledger : ld();
+  const { records } = await readRecords(dir);
+  const { parseSince } = await import('./lib/ledger/tool.js');
+  const since = typeof flags.since === 'string' ? parseSince(flags.since) : 0;
+  return { dir, records, since: since || 0 };
+}
+
+async function diagnoseCmd(rest) {
+  const flags = ledgerFlags(rest);
+  const { diagnose, renderDiagnostics } = await import('./lib/diagnose.js');
+  const { records, since } = await loadDiagnoseInputs(flags);
+
+  // 有监控数据就一并纳入（相关性，不是因果）
+  let monitor;
+  try {
+    const { monitorDir, readEvents, readSamples } = await import('./lib/monitor/store.js');
+    const mdir = typeof flags.monitor === 'string' ? flags.monitor : monitorDir();
+    const { events } = await readEvents({ dir: mdir, limit: 500 });
+    const { rows: samples } = await readSamples({ dir: mdir, limit: 5 });
+    monitor = { events, procs: samples.at(-1)?.procs ?? [] };
+  } catch { /* 监控数据不可用不是错误：诊断仍可只基于账本 */ }
+
+  const d = diagnose(records, {
+    since,
+    minCount: Number(flags.min) || 3,
+    topK: Number(flags.top) || 20,
+    monitor,
+  });
+
+  if (flags.json === true || flags.json === 'true') { printJson(d); return; }
+  console.log(renderDiagnostics(d));
+}
+
+async function fixpromptCmd(rest) {
+  const flags = ledgerFlags(rest);
+  const { diagnose } = await import('./lib/diagnose.js');
+  const { buildFixPrompt } = await import('./lib/fixprompt.js');
+  const { records, since } = await loadDiagnoseInputs(flags);
+
+  const d = diagnose(records, { since, minCount: Number(flags.min) || 3 });
+  const text = buildFixPrompt(d, {
+    profile: typeof flags.profile === 'string' ? flags.profile : 'desktop',
+    home: typeof flags.home === 'string' ? flags.home : undefined,
+    ledgerDir: typeof flags.ledger === 'string' ? flags.ledger : undefined,
+    repoDir: typeof flags.repo === 'string' ? flags.repo : undefined,
+    maxItems: Number(flags.top) || 8,
+    includeP3: flags.p3 !== 'false',
+  });
+
+  if (typeof flags.out === 'string') {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(flags.out, text, 'utf8');
+    printJson({ ok: true, out: flags.out, chars: text.length });
+    return;
+  }
+  // 直接吐纯文本（便于管道 / 复制）
+  console.log(text);
 }

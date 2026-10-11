@@ -1,4 +1,47 @@
-# dsh-capability-aware · DSH 自我能力感知插件
+# dsh-efficiency · DSH 效率机
+
+> **v0.9.0（2026-10-11）· 扩容为「DSH 效率机」：接口索引 + 资源监控 + 分级诊断**
+>
+> **改名**：`dsh-capability-aware` → **`dsh-efficiency`**（插件 id、数据目录 `~/.dsh/data/efficiency/`、
+> RPC 前缀 `/api/efficiency/*`、三段提示词命名空间 `efficiency:*`、自供给技能 `efficiency-lookup`、
+> agent 工具 `efficiency_query`）。旧产物由 provisioner **主动退役**（旧 `AGENTS.md` 管理块与旧技能目录
+> `capability-lookup`）——见 `lib/provision.js` 的 `LEGACY_MARK_PAIRS` / `retireLegacySkills()`。
+>
+> **三条目标**（用户原话）：
+>
+> **① 索引并快速定位工具/插件/环境/接口，为其他插件高效工作提供支持** —— 新增**接口面**
+> （`lib/interfaces.js`）：宿主 Cordis 服务（13 条已知服务 + 运行期 `ctx.get` 探测补 `available` 真值）、
+> Typert Remote（从各包 `lib/typert.host.js` 静态提取 id/service/method/params）、客户端 UI 插槽
+> （19 个，每个带**语义专属触发词**，否则检索会退化成任意并列）、HTTP 路由前缀。实测 **174 条**接口条目，
+> `type: 'interface'`，与能力条目走同一条检索链路。
+>
+> **② 监控运行中的插件/工具/技能等资源调度，防范卡死崩溃** —— `lib/monitor/`：**进程层**用 koffi FFI
+> 直读 Win32（`OpenProcess` / `GetProcessTimes` / `K32GetProcessMemoryInfo` / `GetProcessIoCounters`；
+> 这**推翻**了原规划「进程层不可达」的结论——Electron JS API 不可达 ≠ 进程数据不可达）；**会话层**读宿主
+> 官方 `sessionStats` 投影算增量；**插件层**读 loader entries 的 Fiber 阶段。单个心跳（默认 3 s，空闲退避到
+> 10 s）+ 有界环形落盘（20000 条，块裁剪）+ **自证开销**（`process.cpuUsage` 量自身，实测 0.000%/tick）。
+> 六条检出规则 `PLUGIN_FAILED`(P0) / `PROCESS_GONE` / `HOT_PROCESS` / `MEMORY_GROWTH` / `IO_STORM` /
+> `SESSION_STALL`，每条带 `evidence.basis`，纪律是**宁可漏报不可误报**（阈值类要求连续 N 次 + 冷却窗抑制）。
+>
+> **③ 记录报错 → 分级诊断 → 修复提示词** —— `lib/diagnose.js` 把错误账本与监控事件合成**版本化诊断信封**
+> （schema `dsh-efficiency/diagnostics/v1`，对齐 dshmarket 诊断范式），按**确定性**（不是严重程度）分档：
+> **P0** 宿主/加载器自己报的确定失败｜**P1** 本机可修且证据充分｜**P2** 需推断或影响面小｜
+> **P3 不是本机该修的**（供应商限流/配额/断流/网络）。实测全量 13303 条记录 → 151 条 finding
+> `{P0:1, P1:21, P2:104, P3:25}`、`fixable=126`；**provider 类占全部错误 45.6%**
+> （RATE_LIMIT 2794 + SERVER 1115 + TIMEOUT 402 + TRANSPORT 283 …）——这正是 P3 存在的原因。
+> `lib/fixprompt.js` 生成一段**可直接粘贴给新会话**的修复提示词（含「先判断身份」安全前置，防止被粘到
+> **另一个** DSH 实例上改错机器），**只生成文本、不自动执行**；P3 单独标「不要修」且**不进可修清单**。
+>
+> **五面齐备**：三段常驻指令面（`efficiency:capability-index` 2950 / `efficiency:error-index` 2951 /
+> `efficiency:resource-index` 2952）+ agent 工具面（`efficiency_query` / `error_ledger_query`）+ RPC 面
+> （`/api/efficiency/*`，含 `/diagnose` 与 `/fixprompt` 两条只读路由）+ CLI + 技能面。
+>
+> **诚实边界（写进提示词正文，不靠人自觉）**：进程层是**测量值**，但一个进程里跑多个插件、
+> **无法据此归因到单个插件**；插件层是**相关性排序，不是 CPU 归因**（DSH 不提供插件级资源计量 API）；
+> 会话层增量是「本插件上次读取至今」的差值、**非宿主官方计费口径**；错误与资源事件的关联是
+> **相关性不是因果**（字段名就叫 `correlatedWith`）。
+>
+> 测试：capability 44 + ledger 55 + efficiency 100 = **199/199 全绿**。
 
 **定位（v4.2，用户裁决）**：本插件是**快速索引底稿 + 兜底**——凡 DSH 已有对应系统的能力领域，
 **权威归已有系统，本插件不重复造轮子**，只提供统一台账、变更审计与本机环境事实；权威系统不可用时才兜底。
@@ -13,16 +56,16 @@
 | **本机硬件/软件/环境事实** | **本插件即权威**（DSH 无等价物） | 唯一来源 |
 
 每条条目都带 `authority`（权威归属：system/how/note）与 `bounds`（适用范围/限制/前置），查询答案里直接透出。
-本机环境速查入口见技能 `capability-lookup`。
+本机环境速查入口见技能 `efficiency-lookup`。
 
 ### 自供给（装上即得）
 
-- **常驻指令面**（v0.7.0，默认开）★ 关键：用宿主公开的 `ctx.systemPrompt.section()` 往**系统提示词**注入一段行为规约——「任务依赖本机环境 / 不确定本机有无该能力 / 怀疑能力已消失时，**起手先调 `capability_query`**」，附权威归属与 CLI 兜底。**完全不改用户任何文件**（不写 `AGENTS.md`），纯运行时贡献，卸载即消失，**任何机器装上就复现**；v0.8.0 起追加第二段同款规约（位次 2951），指向错误账本工具 `error_ledger_query`；
-- **技能入口**（默认开）：安装后首次启动自动把 `capability-lookup` 技能写入 `~/.dsh/skills/`（幂等带版本戳），harness 的技能目录即出现本能力，无需手工配置；
-- **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——**工具优先**：起手直接调 `capability_query` 工具（不用开终端、不用记路径），CLI 只作兜底/台账/审计。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
+- **常驻指令面**（v0.7.0，默认开）★ 关键：用宿主公开的 `ctx.systemPrompt.section()` 往**系统提示词**注入一段行为规约——「任务依赖本机环境 / 不确定本机有无该能力 / 怀疑能力已消失时，**起手先调 `efficiency_query`**」，附权威归属与 CLI 兜底。**完全不改用户任何文件**（不写 `AGENTS.md`），纯运行时贡献，卸载即消失，**任何机器装上就复现**；v0.8.0 起追加第二段同款规约（位次 2951），指向错误账本工具 `error_ledger_query`；
+- **技能入口**（默认开）：安装后首次启动自动把 `efficiency-lookup` 技能写入 `~/.dsh/skills/`（幂等带版本戳），harness 的技能目录即出现本能力，无需手工配置；
+- **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——**工具优先**：起手直接调 `efficiency_query` 工具（不用开终端、不用记路径），CLI 只作兜底/台账/审计。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
   实测依据：一天运行日志显示后台扫描 103 次/0 错误，但 harness 主动调用 0 次——缺的就是这个必经触发点。
 
-> **v0.8.0（2026-10-11）· 会话错误账本并入（用户裁决：「做进 dsh-capability-aware 里面，不是新开一个插件」）**
+> **v0.8.0（2026-10-11）· 会话错误账本并入（用户裁决：「做进 dsh-efficiency 里面，不是新开一个插件」）**
 > **为什么并入**：本插件的定位原则④是「其他系统出问题我兜底」——**「本机有什么能力」与「什么坏了 / 缺什么」
 > 是同一问题的两面**。做成独立插件会让「能力清单」与「能力失效史」分家，agent 得记住两个工具、两份清单。
 > **能力**：实时订阅 `session/event` 捕获每个会话的报错（工具失败 / LLM 重试 / 回合失败 / 中断 / 插件装载异常），
@@ -33,8 +76,8 @@
 > 因此**自修复候选只收 `owner=local`**，供应商类错误一律不列——否则会去「修」不该修的东西。
 > 本机真实可修的第一大项是 edit 工具误用（`FS_EDIT_NOT_FOUND` 773 + `old_string/new_string must differ` 308
 > + `FS_NOT_OBSERVED` 594 ≈ 700 条），全部围绕「先 read 再 edit」这条纪律。
-> **三面齐备**：常驻指令面（`capability-aware:error-index`，位次 2951）+ agent 工具面（`error_ledger_query`，五视图）+
-> RPC 面（`/api/capability-aware/ledger/*` 七条）+ CLI（`node cap.mjs ledger <子命令>`）。
+> **三面齐备**：常驻指令面（`efficiency:error-index`，位次 2951）+ agent 工具面（`error_ledger_query`，五视图）+
+> RPC 面（`/api/efficiency/ledger/*` 七条）+ CLI（`node cap.mjs ledger <子命令>`）。
 > **只读承诺**：只读会话日志，**不删任何文件**（源码级断言 `T48` 锁死）；只给候选与证据，不做自动改动。
 > 测试：capability 40 项 + ledger 55 项 = **95/95 全绿**。
 
@@ -49,7 +92,7 @@
 > 两个坑已避：① 用 `ctx.inject(['systemPrompt'])` **软注入**，硬声明 `export const inject` 会让极简 profile 整体 pending；
 > ② 注册用 `scoped.effect(...)` 包裹，否则热重载在同层重复注册会 throw（宿主 `section()` 明确如此规定）。
 > **实证**（非纸面）：真实 cordis `Context` + 真实 `SystemPrompt` 服务下 `section()` 接受注册、`renderPrompt()` 输出含本段正文；
-> 隔离真空 `DSH_CAP_HOME` 跑真实 `apply()` → `promptSection` 段注册、技能 v0.7.0 落盘、`AGENTS.md` **未**被创建。
+> 隔离真空 `DSH_EFF_DSH_HOME` 跑真实 `apply()` → `promptSection` 段注册、技能 v0.7.0 落盘、`AGENTS.md` **未**被创建。
 > 回归测试 T28–T30，全套 **36/36 绿**。
 
 > **v0.6.1（2026-10-09）· 缺陷 #7：监听过宽致写放大（运行体检取证）**
@@ -60,7 +103,7 @@
 > **修法**：每个监听根加**文件名白名单**——`storages` 只认 `mcp_connector.json` / `dsh_automation.json`
 > （`lib/scanner.js:271` 与 `:334` 真正读的两个文件），`memory` 只认 `README.md` 与主题 markdown，
 > `plugins` 只认 `.yml/.yaml/.js/.mjs/.json`；拿不到文件名时仍放行（宁可多扫一次，不漏真实变更）。
-> 同版把供给文本（AGENTS 块 + `capability-lookup` 技能正文）统一改为**工具优先**。
+> 同版把供给文本（AGENTS 块 + `efficiency-lookup` 技能正文）统一改为**工具优先**。
 > 回归测试 T24–T27（含真实 `fs.watch` 行为级验证），全套 **33/33 绿**。
 
 
@@ -101,14 +144,66 @@
 >
 > 测试 20 → **29 全绿**（新增 T15–T23 逐条锁死上述修复，含源码级断言防回归）。
 
-## 三个核心功能
+## 核心功能
 
 | 功能 | 实现 | 入口 |
 |---|---|---|
 | 能力自感知 | 10 类探针扫描能力地形 → fingerprint 级 diff → JSON 快照落盘 | `cap.mjs scan` / boot 自动扫描 / 每日巡检 |
+| **接口面索引**（v0.9.0） | 宿主 Cordis 服务 + Typert Remote + 19 个客户端插槽 + HTTP 路由前缀 → `type:'interface'` 条目 | `cap.mjs interface` / `efficiency_query` |
 | 能力快速检索 | 中英混排分词 + BM25-lite IDF + 触发词/人工别名直配 + 负触发降权 + 事实型降权 → 置信度排序 | `cap.mjs query "<任务>"` |
 | 缺失引导 | no_match / stale 条目 → 按类型给出补足动作 + 验证命令（硬件=替代方案、软件=安装引导） | `cap.mjs stale` / `cap.mjs guide` |
 | **错误账本**（v0.8.0） | 实时订阅会话事件 + 历史日志回填 → 十切面聚合 → 自修复候选（只收 owner=local） | `error_ledger_query` 工具 / `cap.mjs ledger <子命令>` |
+| **资源监控**（v0.9.0） | 进程层 koffi FFI 直读 Win32 + 会话层投影差分 + 插件层 Fiber 阶段 → 3 s 心跳 + 有界环形落盘 + 六条检出规则 | `cap.mjs monitor` / `/api/efficiency/monitor/*` |
+| **分级诊断**（v0.9.0） | 账本记录 + 监控事件 → 版本化诊断信封，按**确定性**分 P0–P3 | `cap.mjs diagnose` / `/api/efficiency/diagnose` |
+| **修复提示词**（v0.9.0） | 诊断信封 → 可粘贴给新会话的提示词（含身份判定前置；**只生成文本不自动执行**） | `cap.mjs fixprompt` / `/api/efficiency/fixprompt` |
+
+## 效率机（v0.9.0）：监控 / 诊断 / 修复提示词
+
+### 为什么要分档，而不是按「严重程度」
+
+分档的判据是**确定性**——「我凭什么敢说这是真的」：
+
+| 档 | 含义 | 判据来源 | 可修 |
+|---|---|---|---|
+| **P0** | 确定故障 | 宿主/加载器**自己报出**的失败（插件 Fiber 阶段 failed、加载器 dispose 异常） | ✅ |
+| **P1** | 本机可修 | 有明确错误码 + 明确修法，且责任方是 `local`（先 read 再 edit、沙箱后端不可用…） | ✅ |
+| **P2** | 需推断 / 低影响 | 会话停滞、IO 尖峰、参数类误用 | ✅ |
+| **P3** | **非本机问题** | 模型供应商限流/配额/断流/网络 | ❌ **绝不进修复提示词** |
+
+一个 P0 未必比 P1「更严重」，但它**一定**是确定的事实而非推断。
+P3 列出来只是让人看到「时间花在哪」——实测它占全部错误的 **45.6%**，如果诊断不区分责任方，
+修复提示词会让 agent 一头扎进供应商限流里改本机代码，纯浪费且会掩盖真问题。
+
+### 监控的诚实边界（这四个「不是」必须一直带着）
+
+1. **进程层**是 koffi 直读 Win32 的**测量值**；但一个进程里跑多个插件，**无法据此归因到单个插件**。
+2. **插件层**只报事实（entry id / 模块名 / 是否启用 / Fiber 阶段），是**相关性排序，不是 CPU 归因**
+   —— DSH 不提供插件级资源计量 API，任何「插件 X 占 N% CPU」都是伪精度。
+3. **会话层**增量是「本插件上次读取至今」的差值，**不是宿主官方计费口径**。
+4. 错误与资源事件的关联是**相关性，不是因果**——字段名就叫 `correlatedWith`，且每条带 `deltaMs`。
+
+### CLI 入口
+
+```powershell
+node cap.mjs monitor --live          # 现采全机进程树（不依赖插件进程；查卡顿/热点）
+node cap.mjs monitor stats           # 心跳统计 + 自证开销（selfMsAvg / selfCpuPctApprox）
+node cap.mjs monitor procs           # 当前进程排行（CPU/内存/IO）
+node cap.mjs monitor sessions        # 三层中的会话层（增量，非官方计费）
+node cap.mjs monitor events          # 检出事件（HOT_PROCESS / MEMORY_GROWTH / …）
+node cap.mjs monitor selfcheck       # 采集器自检（自耗是否超过心跳的 0.5%）
+
+node cap.mjs diagnose [--min=N] [--severity=P0]   # 分级诊断
+node cap.mjs fixprompt [--out=f.md]               # 生成修复提示词（只生成，不自动执行）
+node cap.mjs interface                            # 接口面清册（服务/Remote/插槽/路由）
+```
+
+**数据布局**：`~/.dsh/data/efficiency/monitor/`（`monitor.v1.jsonl` 样本环形 + `events.v1.jsonl`
+检出事件 + `meta.v1.json`）。与账本同级——一个插件一个数据目录。
+
+**配置**（profile 侧 `cordis.patch.yml` 覆盖）：`monitor: false` 整体关闭，或传对象细调
+`intervalMs` / `idleMs` / `sampleIntervalMs` / `maxSamples` / `keepRaw` / `detect.{hotCpuPct,hotStreak,
+memGrowthMbPerMin,memStreak,ioStormMbPerTick,stallTicks,cooldownMs}` / `dir`；
+`diagnose: false` 关掉两条诊断 RPC（**CLI 不受影响**——它直读落盘数据，不经宿主）。
 
 ## 错误账本（v0.8.0）
 
@@ -153,7 +248,7 @@ node cap.mjs ledger report                # 人类可读概览
 node cap.mjs ledger export [--out=f.json]
 ```
 
-**数据布局**：`~/.dsh/data/capability-aware/ledger/`（`events.v1.jsonl` 追加式 + `meta.v1.json` 回填水位线）。
+**数据布局**：`~/.dsh/data/efficiency/ledger/`（`events.v1.jsonl` 追加式 + `meta.v1.json` 回填水位线）。
 与能力清单同属一个插件数据目录——一个插件一个数据目录（`topic-trail` 先例），清单在 `../capabilities.json`。
 
 **诚实边界**：① 只读，绝不删除或修改任何会话日志；② 只给候选与证据，**不做自动改动**（自修复是人的决定）；
@@ -185,10 +280,10 @@ node cap.mjs ledger export [--out=f.json]
 
 ```powershell
 # 装进 desktop profile（本机 profile 名）
-dsh plugin --profile desktop add "file:D:/Agent/CodeLib/dsh-capability-aware"
+dsh plugin --profile desktop add "file:D:/Agent/CodeLib/dsh-efficiency"
 # 首次安装即刻生效（宿主监听 profile 变更并立即重新 apply，实测装完 4 秒 apply() 已运行），
 # 不必重启。启动后 3 秒（scanDelayMs）自动完成首次全量扫描，
-# 清单落盘：~/.dsh/data/capability-aware/capabilities.json
+# 清单落盘：~/.dsh/data/efficiency/capabilities.json
 ```
 
 > **⚠ 生效时机（2026-10-11 实测修正，此前 README 的「必须重启」说法有误）**
@@ -197,10 +292,10 @@ dsh plugin --profile desktop add "file:D:/Agent/CodeLib/dsh-capability-aware"
 > - **更新已装插件的代码**：`remove` + `add` 只刷新磁盘副本并重新 apply，**跑不了新代码**。模块走 `import()`，Node 的 ESM 缓存按解析后的 URL 键控，**同一路径在进程内只求值一次**。
 > - 实测（MARKER 实验）：把版本改成 `0.7.1-MARKER` 并重装，安装副本磁盘上确为 MARKER、`uptimeMs` 归零证明重新 apply 了，但活体仍报旧版本号 —— 跑的是首次加载时缓存的模块。
 > - 所以**换新代码必须重启 DSH Desktop**（托盘菜单「重启」，或 `POST /api/desktop/restart`）。
-> - 判断活体到底在跑哪一版：看 `~/.dsh/skills/capability-lookup/SKILL.md` 的版本戳（幂等写，内容变才刷新），或 `GET /api/capability-aware/doctor`。
+> - 判断活体到底在跑哪一版：看 `~/.dsh/skills/efficiency-lookup/SKILL.md` 的版本戳（幂等写，内容变才刷新），或 `GET /api/efficiency/doctor`。
 
 > 建议先在隔离 profile 验证（不碰主 profile、不占端口）：
-> `dsh plugin --profile cap-probe add "file:D:/Agent/CodeLib/dsh-capability-aware"` →
+> `dsh plugin --profile cap-probe add "file:D:/Agent/CodeLib/dsh-efficiency"` →
 > `dsh --profile cap-probe --no-open --port 0` → 观察数据文件落盘 → 清理 profile。
 
 ⚠ 依赖纪律：本插件零运行时依赖（不 import 任何宿主包），无 `peerDependencies`
@@ -210,21 +305,25 @@ dsh plugin --profile desktop add "file:D:/Agent/CodeLib/dsh-capability-aware"
 
 ```powershell
 node cap.mjs scan                # 全量扫描 + 落盘 + 打印 diff（新增/消失/变更）
-node cap.mjs list [类型]          # 列清单（plugin|skill|memory|mcp|automation|tool|env|hardware|software）
+node cap.mjs list [类型]          # 列清单（plugin|skill|memory|mcp|automation|tool|env|hardware|software|interface）
 node cap.mjs query "<任务描述>"   # 匹配能力 + 调用方式；默认摘要档，--detail=full 吐全条目
 node cap.mjs doctor              # 能力健康报告（扫描年龄/探针错误/陈旧条目/负触发/检索自检/IDF 健康）
 node cap.mjs stale               # 与上次快照 diff，报告已消失的能力（不落盘）
 node cap.mjs guide "<能力名>" [类型]  # 对指定缺失能力生成补足引导
 node cap.mjs alias "<条目名>" <别名…>  # 灌人工别名（检索词表鸿沟的正解，如 A股→AKShare）；clear 清空
+node cap.mjs interface           # 接口面：宿主服务 / Typert Remote / 客户端插槽 / 路由前缀
+node cap.mjs monitor --live      # 资源监控：现采全机进程树
+node cap.mjs diagnose            # 分级诊断：P0–P3 按确定性分档
+node cap.mjs fixprompt           # 生成修复提示词（只生成文本，不自动执行）
 ```
 
 **定期巡检**（已建 DSH automation `automation_8fa49ea2-…`：每日 06:30 Asia/Shanghai，
 全新会话执行 scan + doctor，removed/warn/error 逐条汇报、不自动修复）。
 重建同款：`automation_create(kind=daily, time=06:30, prompt=上述巡检流程)`。
 
-环境变量：`DSH_CAP_DSH_HOME` 重定向扫描根（多 profile / 测试）；`DSH_CAP_FILE` 重定向清单文件。
+环境变量：`DSH_EFF_DSH_HOME` 重定向扫描根（多 profile / 测试）；`DSH_EFF_FILE` 重定向清单文件。
 
-Web/RPC 面（`/capability-aware/query|list|scan|guide`）按最小赌注接入宿主
+Web/RPC 面（`/efficiency/query|list|scan|guide`）按最小赌注接入宿主
 `ctx.connection.rpc`；若宿主 RPC API 形态变化，CLI 通路不受影响（核心逻辑零依赖宿主）。
 
 ## 能力条目数据结构
@@ -273,7 +372,8 @@ Web/RPC 面（`/capability-aware/query|list|scan|guide`）按最小赌注接入�
 ## 测试
 
 ```powershell
-npm test   # node --test test/capability.test.mjs test/ledger.test.mjs —— 95 项（40 + 55）
+npm test   # node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs
+           # —— 199 项（44 + 55 + 100），全绿
 # 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件。
 ```
 
@@ -290,13 +390,46 @@ whale.json 被挡而 mcp_connector.json 放行 / 工具优先文案断言 / 版�
 `effect` 包裹 + 可关闭；`index.js` 接线且 `promptSection` 默认开启、仍**不**硬声明 `inject`、
 AGENTS 指针仍默认关闭）、
 **v0.8.0 账本并入回归 T31–T34**（源码级接线 + 装配级真挂载 + `ledger:false` 完全关断 +
-`lib/ledger/index.js` 只导出 `mountLedger` 不导出 `apply`，防双份 RPC 路由）。
+`lib/ledger/index.js` 只导出 `mountLedger` 不导出 `apply`，防双份 RPC 路由）、
+**v0.9.0 旧品牌退役 T35–T38**（`provisionAgentsPointer` **退役**旧品牌管理块而不是再追加一块、
+标记外内容一字不动、新块有且仅有一个且幂等；`retireLegacySkills` 只在**证据充分**时删旧技能目录、
+同名非本插件所写一律 `kept-foreign` 保留、`retireLegacy:false` 可关）。
 
 `test/ledger.test.mjs`（55 项）另覆盖：多帧 zstd 解码与 torn 帧、分类学与责任方判定、
 对象抽取边界（含空格路径 / Unix 路径至少两级 / 英文连接词截断）、归因状态机（callId 关联、
 污染工具名拒绝、技能归因、provider/model 富化、callId 表软上限）、存储与原子写、
 切面聚合与自修复候选（含「桶键不被 `record.code` 覆写」的回归）、工具五视图、
 历史回填与实时水位线、常驻指令面、源码级只读断言、`mountLedger` 端到端含真实 RPC handler 调用。
+
+`test/efficiency.test.mjs`（100 项）覆盖 v0.9.0 三条目标：
+
+- **诊断（目标 3）**：schema 版本化常量、四档语义与 `fixable` 标志、**每条规则都带 note**、
+  文件系统类→P1、加载器/宿主契约→P0、供应商类→P3、`minCount`/`since` 阈值、未归类兜底归 **P2 而非 P0**、
+  无码错误经 `classify` 兜底、**档位与 owner 自洽**（可修项 owner 必须是 local，原始归因留 `ownerRaw`）、
+  **全量不变量「fixable 里绝不出现 P3 或 owner=provider」**、监控事件并入且带 `evidence.basis`、
+  未知事件码直接丢弃、同码同主体跨源合并取更确定档位、`correlatedWith` 带 `deltaMs`、相关窗口、`topK`。
+- **修复提示词**：「先判断身份」必须排在复现之前、第二步禁止照文档直接改代码、
+  P3 只出现在「不要修」段落、`includeP3:false` 时彻底不出现、无可修项如实写「无」、
+  第四步六条硬约束（含「不得删账本记录」「不得改 provider 项」）、结尾声明只生成不执行、`extra` 追加。
+- **监控（目标 2）**：六条规则各自的命中与**不命中**（连续 N 次、streak 中断归零、自身进程不算热点、
+  冷却窗抑制与过期后重报、内存非单调不报、斜率不足不报、IO 首周期无基线不报、负增量不报、
+  会话停摆需有未完成 step）、`reset()` 清空状态；存储的环形**块裁剪**（超过 `max*1.25` 才裁到 `max*0.75`）、
+  坏行跳过计数、事件文件独立不裁、写失败不抛、`DSH_MONITOR_HOME` 覆盖；`classify` 全部分支、
+  `cpuPercent` 边界返回 `null` 而非 NaN；**源码级**断言 `procs.js` 绝不用 `execFileSync`（阻塞事件循环）
+  且复用 `scratch` 缓冲；插件层 group 跳过与 `self` 标注、`rankPluginCandidates` 失败置顶；
+  会话层增量语义与投影缺失时的 note 不覆盖第一手原因。
+- **接口面（目标 1）**：`hostNodeModules` 显式覆盖与无效路径兜底、`scanTypertRemotes` 正则解析、
+  `scanBundleRows` 解析、`nm=null` 返回空数组、19 个插槽都有语义专属触发词、`slotTriggers` 去重、
+  `scanSlots` 反推消费者、`KNOWN_SERVICES` 每条带可粘贴 `how`、无 ctx 时 `available=null`+`origin=static`
+  （**不假装知道可用性**）、有 ctx 时补真值、`ctx.get` 抛错被吞、`interfacesToEntries` 每条带
+  `invoke.how` 且**指纹唯一**、路由条目不含旧品牌。
+- **效率段与接线**：段名 `efficiency:resource-index` / 位次 2952、正文含三段问题与 CLI 入口、
+  **显式警告「P3 一律不要动」**、四条诚实边界、`mountEfficiencySection` 从中央常量推导 order、
+  无 `systemPrompt` 时优雅降级、`enabled=false`/无 ctx 不挂载、`section()` 抛错被捕获、
+  源码级三坑防护（软注入 / `effect` 包裹 / 原地改属性不乐观谎报）、
+  **全仓无旧品牌残留**（`docs/` 历史记录、`test/` 夹具与 `provision.js` 的「为删除而引用」三处显式豁免并写明理由）、
+  三段位次连续 2950/2951/2952、`diagnose` 配置键**有真实消费者**（防死配置）、
+  诊断 RPC 段落**源码级只读断言**（不得出现写操作）、`diagnose:false` 只关两条 RPC 不影响核心面。
 
 ## 已知边界（未验证 / 待做）
 
@@ -322,3 +455,18 @@ AGENTS 指针仍默认关闭）、
   本段是**常驻**的，会占用每轮少量上下文（正文约 460 字符）；不想要可在 profile 侧设 `promptSection: false`。
 - 与本插件无关的顺带发现（未处理）：`~/.dsh/storages` 下有 23 个 `.*.tmp` 共约 722 MB，
   内容为 `{"unit":{"name":"whale",...}}`，疑为 whale 插件原子写残留，**未删除**（删前须核实引用）。
+- **v0.9.0 改名迁移（2026-10-11 已完成，留档以备复核）**：源码目录 → `D:\Agent\CodeLib\dsh-efficiency`；
+  profile 依赖键与 `dsh.profile.bundles` 条目、本机覆盖块的 id/name 均已同步；安装副本刷新为
+  `node_modules\dsh-efficiency`；数据由旧目录迁到 `~/.dsh/data/efficiency/`——
+  `capabilities.json` + `ledger/events.v1.jsonl`（8.5 MB / 13303 条）+ `ledger/meta.v1.json`，
+  **逐文件字节数核对一致**，旧目录保留作备份。
+  ⚠ 迁移踩到并记下的坑：**数据目录名取自 `lib/index.js` 的 `const name`（`efficiency`），
+  不是包名（`dsh-efficiency`）**——两者混用会把数据搬到错地方；dry-run 抓到了它。
+  旧品牌产物由 provisioner **主动退役**：旧 AGENTS.md 管理块与旧技能目录 `capability-lookup`
+  （退役前校验内容确属本插件旧版所写，证据不足则保留不删）。
+- **监控数据是推断与测量的混合体**，README 与提示词里已逐条标注四个「不是」（见上文「监控的诚实边界」）。
+  其中**插件层无法归因**是架构性限制，不是实现缺陷：宿主不暴露插件级资源计量。
+- **进程层只在 Windows 可用**：koffi 直读 Win32 API 是主要路径；非 Windows 或 koffi 缺失时
+  `sampleAll()` 退化为 `source:'self-only'`，只报 Host 自己并附 `note`（**不假装拿到全机数据**）。
+- **`SESSION_STALL` 是六条规则里最弱的一条**（唯一基于推断而非测量），阈值刻意保守（默认连续 5 个周期），
+  宁可漏报。若实测发现误报，先调 `detect.stallTicks` 而不是删规则。

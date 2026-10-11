@@ -1,7 +1,7 @@
 {
-  "name": "dsh-capability-aware",
-  "version": "0.8.0",
-  "description": "DSH 自我能力感知插件：自动扫描维护能力清单（插件/技能/记忆/连接器/自动化/工具/本机环境/硬件/软件），快速检索匹配能力及调用方式，缺失给补足引导；v0.8.0 并入会话错误账本——记录每个会话的报错并按插件/技能/对象/责任方等切面聚合，供自修复与自进化；装上即得（自供给 capability-lookup 技能 + 系统提示词段，免改用户任何文件）。",
+  "name": "dsh-efficiency",
+  "version": "0.9.0",
+  "description": "DSH 效率机：①索引并快速定位工具/插件/环境/接口（含宿主 Cordis 服务、Typert Remote、客户端插槽、HTTP 路由），为其他插件高效工作提供支持；②监控运行中的插件/工具/技能等资源调度（进程层 koffi FFI 直读 + 会话层投影差分 + 插件层 Fiber 阶段），检出热点/内存增长/IO 风暴/装载失败等异常，防范卡死崩溃；③记录每个会话的报错并按插件/技能/对象/责任方等切面聚合，做 P0–P3 分级诊断并生成修复提示词，供自修复与自进化；装上即得（自供给 efficiency-lookup 技能 + 三段系统提示词，免改用户任何文件）。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -19,9 +19,11 @@
     "dsh",
     "deepseek-harness",
     "plugin",
+    "efficiency",
     "capability",
     "registry",
     "self-aware",
+    "resource-monitor",
     "error-ledger",
     "self-repair"
   ],
@@ -35,6 +37,6 @@
     }
   },
   "scripts": {
-    "test": "node --test test/capability.test.mjs test/ledger.test.mjs"
+    "test": "node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs"
   }
 }
