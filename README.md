@@ -17,10 +17,26 @@
 
 ### 自供给（装上即得）
 
-- **常驻指令面**（v0.7.0，默认开）★ 关键：用宿主公开的 `ctx.systemPrompt.section()` 往**系统提示词**注入一段行为规约——「任务依赖本机环境 / 不确定本机有无该能力 / 怀疑能力已消失时，**起手先调 `capability_query`**」，附权威归属与 CLI 兜底。**完全不改用户任何文件**（不写 `AGENTS.md`），纯运行时贡献，卸载即消失，**任何机器装上就复现**；
+- **常驻指令面**（v0.7.0，默认开）★ 关键：用宿主公开的 `ctx.systemPrompt.section()` 往**系统提示词**注入一段行为规约——「任务依赖本机环境 / 不确定本机有无该能力 / 怀疑能力已消失时，**起手先调 `capability_query`**」，附权威归属与 CLI 兜底。**完全不改用户任何文件**（不写 `AGENTS.md`），纯运行时贡献，卸载即消失，**任何机器装上就复现**；v0.8.0 起追加第二段同款规约（位次 2951），指向错误账本工具 `error_ledger_query`；
 - **技能入口**（默认开）：安装后首次启动自动把 `capability-lookup` 技能写入 `~/.dsh/skills/`（幂等带版本戳），harness 的技能目录即出现本能力，无需手工配置；
 - **AGENTS.md 指针**（默认关闭）：向 `~/.dsh/AGENTS.md` 注入带管理标记的块——**工具优先**：起手直接调 `capability_query` 工具（不用开终端、不用记路径），CLI 只作兜底/台账/审计。改用户规则文件须显式配置 `provisionAgentsPointer: true`（在宿主 profile 的 cordis.patch.yml 覆盖即可），幂等维护、插件升级自动刷新。
   实测依据：一天运行日志显示后台扫描 103 次/0 错误，但 harness 主动调用 0 次——缺的就是这个必经触发点。
+
+> **v0.8.0（2026-10-11）· 会话错误账本并入（用户裁决：「做进 dsh-capability-aware 里面，不是新开一个插件」）**
+> **为什么并入**：本插件的定位原则④是「其他系统出问题我兜底」——**「本机有什么能力」与「什么坏了 / 缺什么」
+> 是同一问题的两面**。做成独立插件会让「能力清单」与「能力失效史」分家，agent 得记住两个工具、两份清单。
+> **能力**：实时订阅 `session/event` 捕获每个会话的报错（工具失败 / LLM 重试 / 回合失败 / 中断 / 插件装载异常），
+> 历史 1.2 GB 会话日志**一次性回填**（1821 文件 / 11.7 万条 / 22.7 秒），按
+> **错误码 / 插件 / 技能 / 对象 / 责任方 / 工具 / 供应商 / 模型 / 类别 / 工作目录** 十个切面聚合。
+> **关键设计（由真机数据驱动）**：`owner` 是**一等切面**——实测本机错误最大来源是模型路由与配额
+> （`RATE_LIMIT` 2790 + `SERVER` 1090 + `TIMEOUT` 430 ≈ provider 5352 条），**不是本机代码缺陷**；
+> 因此**自修复候选只收 `owner=local`**，供应商类错误一律不列——否则会去「修」不该修的东西。
+> 本机真实可修的第一大项是 edit 工具误用（`FS_EDIT_NOT_FOUND` 773 + `old_string/new_string must differ` 308
+> + `FS_NOT_OBSERVED` 594 ≈ 700 条），全部围绕「先 read 再 edit」这条纪律。
+> **三面齐备**：常驻指令面（`capability-aware:error-index`，位次 2951）+ agent 工具面（`error_ledger_query`，五视图）+
+> RPC 面（`/api/capability-aware/ledger/*` 七条）+ CLI（`node cap.mjs ledger <子命令>`）。
+> **只读承诺**：只读会话日志，**不删任何文件**（源码级断言 `T48` 锁死）；只给候选与证据，不做自动改动。
+> 测试：capability 40 项 + ledger 55 项 = **95/95 全绿**。
 
 > **v0.7.0（2026-10-10）· 常驻指令面：让「全新安装」达到应有水平**
 > **问题**（用户提出）：技能入口会自动出现，但 `~/.dsh/AGENTS.md` 不会被动——意味着**别的机器装了这个插件，
@@ -92,6 +108,57 @@
 | 能力自感知 | 10 类探针扫描能力地形 → fingerprint 级 diff → JSON 快照落盘 | `cap.mjs scan` / boot 自动扫描 / 每日巡检 |
 | 能力快速检索 | 中英混排分词 + BM25-lite IDF + 触发词/人工别名直配 + 负触发降权 + 事实型降权 → 置信度排序 | `cap.mjs query "<任务>"` |
 | 缺失引导 | no_match / stale 条目 → 按类型给出补足动作 + 验证命令（硬件=替代方案、软件=安装引导） | `cap.mjs stale` / `cap.mjs guide` |
+| **错误账本**（v0.8.0） | 实时订阅会话事件 + 历史日志回填 → 十切面聚合 → 自修复候选（只收 owner=local） | `error_ledger_query` 工具 / `cap.mjs ledger <子命令>` |
+
+## 错误账本（v0.8.0）
+
+**解决什么**：同一类报错在几十个会话里反复出现，却没人知道它出现过多少次、在哪台机器、哪个工具上——
+于是每次都从零排查。账本把「报错」变成可聚合、可追溯、可优先排序的**证据**。
+
+**记录哪些**（错误事件面，全部经源码取证）：
+
+| 事件 | 形状 | 说明 |
+|---|---|---|
+| `tool/result` | `data.error = {name, code}` | 工具失败；工具名靠 `callId` ↔ `tool/call` 关联 |
+| `llm/retry` | `data.failure = {message, code}` + `provider` | 模型层失败（限流/断流/超时）；`model` 靠 `request/header` 富化 |
+| `turn/end` | `data.reason.kind === 'error'` | 回合级失败 |
+| `assistant/message` | `interrupted === true` | 用户中断（可关） |
+| `loader/partial-dispose` | entry 异常卸载 | 插件装载期错误（插件切面） |
+| `agent/error` | `{turn, step, error}` | 回合内抛错（罕见但最权威） |
+
+**十个切面**：`code` / `plugin` / `skill` / `object` / `owner` / `tool` / `provider` / `model` / `category` / `cwd`。
+其中 `object` 是从错误正文里抽出的**来源对象**（文件路径 / URL / 命令），`owner` 是**责任方**：
+`local`（本机可修）/ `provider`（供应商侧）/ `external`（网络）/ `user`（用户中断）/ `unknown`。
+
+**五视图工具** `error_ledger_query({ view, key, since, limit })`：
+
+| view | 用途 |
+|---|---|
+| `recent`（默认） | 最近错误明细 |
+| `facets` | 十切面聚合；`key` 下钻单切面 |
+| `repair` | **自修复候选**（只收 `owner=local`，按 次数×会话数 排序，附样本与建议） |
+| `search` | 按关键词检索原文 |
+| `report` | 概览（时间跨度 / 责任方分布 / Top 码 / Top 对象 / Top 插件技能 / 按天分布） |
+
+**CLI 等价入口**（人的通道；agent 走工具）：
+
+```powershell
+node cap.mjs ledger backfill [--force] [--workspace=] [--max-files=N] [--concurrency=N]
+node cap.mjs ledger stats                 # 总量 / 时间跨度 / 责任方分布 / 按天
+node cap.mjs ledger recent [N]            # 最近 N 条明细
+node cap.mjs ledger facets [切面] [--top=K] [--since=7d]
+node cap.mjs ledger repair [--min=5]      # 自修复候选（默认 ≥3 次）
+node cap.mjs ledger search "<词>" [N]
+node cap.mjs ledger report                # 人类可读概览
+node cap.mjs ledger export [--out=f.json]
+```
+
+**数据布局**：`~/.dsh/data/capability-aware/ledger/`（`events.v1.jsonl` 追加式 + `meta.v1.json` 回填水位线）。
+与能力清单同属一个插件数据目录——一个插件一个数据目录（`topic-trail` 先例），清单在 `../capabilities.json`。
+
+**诚实边界**：① 只读，绝不删除或修改任何会话日志；② 只给候选与证据，**不做自动改动**（自修复是人的决定）；
+③ 供应商/配额类错误**不进**自修复候选——那是换路由/退避的事，不是「修代码」；④ 正文截断 1200 字符
+（账本不是上下文仓库，只存定位所需的证据）；⑤ `capture:false` 时完全不订阅运行期事件（不留钩子）。
 
 ## 能力地形（探针覆盖）
 
@@ -206,7 +273,7 @@ Web/RPC 面（`/capability-aware/query|list|scan|guide`）按最小赌注接入�
 ## 测试
 
 ```powershell
-npm test   # node --test test/capability.test.mjs —— 36 项验收测试（隔离 fixture，不碰真实 ~/.dsh）
+npm test   # node --test test/capability.test.mjs test/ledger.test.mjs —— 95 项（40 + 55）
 # 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件。
 ```
 
@@ -221,7 +288,15 @@ whale.json 被挡而 mcp_connector.json 放行 / 工具优先文案断言 / 版�
 **v0.7.0 常驻指令面回归 T28–T30**（`promptSectionText` 含行为规约/工具名/权威归属且工具优先；
 `mountPromptSection` 软注入 `['systemPrompt']` + order 有限且落 2900..3000 空档 + `text` 函数形态 +
 `effect` 包裹 + 可关闭；`index.js` 接线且 `promptSection` 默认开启、仍**不**硬声明 `inject`、
-AGENTS 指针仍默认关闭）。
+AGENTS 指针仍默认关闭）、
+**v0.8.0 账本并入回归 T31–T34**（源码级接线 + 装配级真挂载 + `ledger:false` 完全关断 +
+`lib/ledger/index.js` 只导出 `mountLedger` 不导出 `apply`，防双份 RPC 路由）。
+
+`test/ledger.test.mjs`（55 项）另覆盖：多帧 zstd 解码与 torn 帧、分类学与责任方判定、
+对象抽取边界（含空格路径 / Unix 路径至少两级 / 英文连接词截断）、归因状态机（callId 关联、
+污染工具名拒绝、技能归因、provider/model 富化、callId 表软上限）、存储与原子写、
+切面聚合与自修复候选（含「桶键不被 `record.code` 覆写」的回归）、工具五视图、
+历史回填与实时水位线、常驻指令面、源码级只读断言、`mountLedger` 端到端含真实 RPC handler 调用。
 
 ## 已知边界（未验证 / 待做）
 

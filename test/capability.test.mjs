@@ -1072,3 +1072,91 @@ test('v0.7.0: index.js 接线系统提示词段且默认开启（安装即得）
   assert.ok(ps.includes("ctx.inject(['systemPrompt']"), 'prompt-section 必须软注入');
   assert.ok(ps.includes('scoped.effect('), 'section 注册必须 effect 包裹');
 });
+
+// ════════════════════════════════════════════════════════════════════════
+// v0.8.0 错误账本并入（用户 m05633 裁决：「做进 dsh-capability-aware 里面，
+// 不是新开一个插件」）。以下为**接线级**断言：主插件必须真的把账本挂起来，
+// 而不是把 lib/ledger/ 当死代码放在仓库里。
+// ════════════════════════════════════════════════════════════════════════
+
+// T31 源码级：index.js 必须 import 并调用 mountLedger，且默认开启
+test('v0.8.0: index.js 接线错误账本且默认开启', async () => {
+  const idx = await fs.promises.readFile(new URL('../lib/index.js', import.meta.url), 'utf8');
+  assert.ok(idx.includes("from './ledger/index.js'"), 'index.js 必须 import lib/ledger/index.js');
+  assert.ok(idx.includes('mountLedger(ctx,'), 'index.js 必须真的调用 mountLedger');
+  assert.ok(/ledger: config\?\.ledger !== false/.test(idx), 'ledger 必须默认开启（!== false 语义）');
+  assert.ok(/ledgerCfg/.test(idx), '应支持 ledger 传对象细调子项');
+  assert.ok(/apply\.__ledger\s*=/.test(idx), '账本句柄应暴露给 CLI/测试');
+});
+
+// T32 装配级：apply() 用最小 fake ctx 真跑，账本三面齐备且 RPC 前缀归 capability-aware
+test('v0.8.0: apply() 真的挂起账本（RPC/工具/指令面 + 命名空间归口）', async () => {
+  const mod = await import(modUrl(path.join(root, 'lib', 'index.js')));
+  const { mkdtempSync } = await import('node:fs');
+  const os = await import('node:os');
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cap-ledger-mount-'));
+  const routes = [];
+  const injected = [];
+  const scoped = {
+    effect(fn, label) { return fn(); },
+    webServer: { register(spec) { routes.push(spec.path); return () => {}; } },
+    tools: { register() { return () => {}; } },
+    systemPrompt: { getSectionOrder: () => 3000, section: () => () => {} },
+  };
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    sessions: { list: () => [] },
+    on() { return () => {}; },
+    effect(fn, label) { return fn(); },
+    inject(deps, cb) { injected.push(deps.join(',')); cb(scoped); },
+  };
+  mod.apply(ctx, {
+    scanOnBoot: false, watch: false, periodicMs: 0,
+    ledger: { dir, sessionsRoot: path.join(dir, 'sessions'), backfillOnBoot: false },
+  });
+
+  const L = mod.apply.__ledger;
+  assert.ok(L, 'apply 后必须能拿到账本句柄');
+  assert.equal(L.cfg.dir, dir, '账本目录应可覆盖（测试隔离）');
+  // RPC 面归 capability-aware 命名空间，不再是独立插件的 /api/error-ledger
+  assert.ok(routes.includes('/api/capability-aware/ledger/stats'), `RPC 前缀应归口，实际 ${routes.filter((r) => r.includes('ledger')).join(',')}`);
+  assert.ok(routes.includes('/api/capability-aware/ledger/health'));
+  assert.ok(!routes.some((r) => r.startsWith('/api/error-ledger')), '不得残留独立插件时代的 RPC 前缀');
+  // 指令面两段同命名空间（能力清单 + 错误账本），互不冲突
+  const { SECTION_NAME: PS_CAP } = await import(modUrl(path.join(root, 'lib', 'prompt-section.js')));
+  const { SECTION_NAME: PS_ERR } = await import(modUrl(path.join(root, 'lib', 'ledger', 'prompt-section.js')));
+  assert.equal(PS_CAP, 'capability-aware:capability-index');
+  assert.equal(PS_ERR, 'capability-aware:error-index', '账本段必须与能力段同命名空间');
+  // 三面齐备
+  assert.ok(injected.includes('systemPrompt') && injected.includes('tools') && injected.includes('webServer'), `软注入面缺失：${injected}`);
+});
+
+// T33 关断语义：ledger:false 时完全不挂（不留钩子、不建目录）
+test('v0.8.0: ledger=false 时账本完全不挂载', async () => {
+  const mod = await import(modUrl(path.join(root, 'lib', 'index.js')));
+  const routes = [];
+  const scoped = {
+    effect(fn) { return fn(); },
+    webServer: { register(spec) { routes.push(spec.path); return () => {}; } },
+    tools: { register() { return () => {}; } },
+    systemPrompt: { getSectionOrder: () => 3000, section: () => () => {} },
+  };
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    sessions: { list: () => [] },
+    on() { return () => {}; },
+    effect(fn) { return fn(); },
+    inject(deps, cb) { cb(scoped); },
+  };
+  mod.apply(ctx, { scanOnBoot: false, watch: false, periodicMs: 0, ledger: false });
+  assert.equal(mod.apply.__ledger, null, 'ledger=false 时句柄必须为 null');
+  assert.ok(!routes.some((r) => r.includes('/ledger/')), 'ledger=false 时不得注册任何账本 RPC');
+});
+
+// T34 账本不得自带 apply（并入后只有 mountLedger；两个 apply 会互相踩 RPC 路由）
+test('v0.8.0: lib/ledger/index.js 导出 mountLedger 而非 apply', async () => {
+  const src = await fs.promises.readFile(new URL('../lib/ledger/index.js', import.meta.url), 'utf8');
+  assert.ok(/export\s*\{[^}]*mountLedger/.test(src), '必须导出 mountLedger');
+  assert.ok(!/export\s+(async\s+)?function\s+apply\s*\(/.test(src), '并入后不得再导出 apply（避免双份 RPC 路由）');
+  assert.ok(src.includes('capability-aware/ledger'), '命名空间应归口 capability-aware');
+});

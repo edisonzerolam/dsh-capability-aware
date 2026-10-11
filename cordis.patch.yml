@@ -1,6 +1,6 @@
 # dsh-capability-aware bundle 层 —— 自我能力感知插件。
 #
-# build: 2026-10-10-v0.7.0-prompt-section（本地适配标记。改 lib/*.js 后**同时**动这一行，
+# build: 2026-10-11-v0.8.0-error-ledger（本地适配标记。改 lib/*.js 后**同时**动这一行，
 #        才能触发 DSH 的 patchReload: live 重载插件；实测只改 lib 不会重载）
 #
 # 注意（YAML 陷阱，harness-ops §E 实证）：
@@ -26,6 +26,22 @@
 #      不写用户技能目录以外的地方），纯运行时贡献，卸载插件即消失。
 #      与 provisionAgentsPointer 的取舍：后者改用户文件故默认关闭、安装者不可复现；
 #      本项默认开启且跨机可复现。两者内容重叠，装到哪台机器都生效的是本项。
+#  ledger: v0.8.0 错误账本（默认 true；也可传对象细调子项，传 false 整体关闭）
+#      与「能力清单」互补：那边查「有什么能力」，这边查「什么坏了 / 缺什么」。
+#      数据落在 ~/.dsh/data/capability-aware/ledger/（events.v1.jsonl + meta.v1.json）。
+#      子项（ledger: { ... }）：
+#        capture: 实时订阅 session/event 等事件（默认 true）
+#        flushMs: 缓冲落盘间隔毫秒（默认 2000，下限 5000）
+#        maxPending: 内存缓冲上限，溢出丢最旧并计数（默认 5000）
+#        recordInterrupts: 记录 assistant/message.interrupted（默认 true）
+#        recordLoader: 记录插件装载期错误（默认 true）
+#        backfillOnBoot: 启动后回填历史会话日志（默认 true）
+#        backfillDelayMs: 回填延迟毫秒（避让启动高峰，默认 8000）
+#        backfillMaxFiles: 单次回填文件数上限，0=不限（默认 0）
+#        backfillMaxBytes: 单次回填解压字节上限（默认 419430400 = 400MB）
+#        sessionsRoot: 会话日志根目录覆盖（默认 <dshHome>/sessions）
+#        dir: 账本数据目录覆盖（默认 <dshHome>/data/capability-aware/ledger）
+#        promptSection: 是否注入错误账本的常驻指令面（默认 true）
 - insert:
     - id: dsh-capability-aware
       name: dsh-capability-aware
@@ -39,3 +55,4 @@
         provisionSkill: true
         provisionAgentsPointer: false
         promptSection: true
+        ledger: true
