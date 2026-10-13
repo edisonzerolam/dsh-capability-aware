@@ -197,6 +197,8 @@ node cap.mjs fixprompt [--out=f.md] [--no-ticket] # 生成修复提示词（默�
 node cap.mjs fixes [list]                         # 修复台账：待修清单 + 复发核验
 node cap.mjs fixes show <id>                      # 单张工单的核验详情
 node cap.mjs fixes close <id> [--note="..."]      # 人工声明已修（声明，不是测量）
+node cap.mjs fixes report --ticket=<id> --finding="<键>" --file=x.js --summary="改了什么"
+                                                  # 反写修复记录（v0.12.0；修完必做）
 node cap.mjs fixes adopt --code=X --kind=tool --name=edit --at="2026-10-11T17:00Z"
                                                   # 为「上线前已经修过」的条目补一张工单
 node cap.mjs interface                            # 接口面清册（服务/Remote/插槽/路由）
@@ -210,7 +212,7 @@ node cap.mjs interface                            # 接口面清册（服务/Rem
 memGrowthMbPerMin,memStreak,ioStormMbPerTick,stallTicks,cooldownMs}` / `dir`；
 `diagnose: false` 关掉两条诊断 RPC（**CLI 不受影响**——它直读落盘数据，不经宿主）。
 
-## 修复台账（v0.11.0）
+## 修复台账（v0.11.0，v0.12.0 增反写）
 
 **解决什么**：诊断告诉你「什么坏了」，修复提示词告诉你「怎么修」，但**没有东西记得你修过**——
 于是同一条 finding 修完之后还在清单里，你无法回答「这条我到底修了没有、修了之后还复发吗」。
@@ -252,7 +254,49 @@ finding 键、当时的次数与会话数、提示词 sha1、开单时刻。**�
 `adopted-by-user`——**分界线是你给的时间，不是系统猜的**。
 
 **RPC**：`GET /api/efficiency/fixes`（台账 + 核验 + 待修清单）、`POST /fixes/close`、
-`POST /fixes/adopt`。设置页有对应的「修复台账」卡片。
+`POST /fixes/adopt`、`POST /fixes/report`。设置页有对应的「修复台账」卡片。
+
+## 反写修复记录（v0.12.0）
+
+**为什么必须反写**：错误账本**只记失败的调用**——`tool/result` 仅在 `isError` 时入库
+（实读 `lib/ledger/extract.js:132-150`）。也就是说，**`edit`/`write` 成功了根本不入账**。
+于是「哪条修了、改了哪些文件」这套信息，账本物理上**看不见**，只有执行者知道。
+不反写，下次诊断还是同一条 finding，而且**无人能回答「这条我到底修过什么」**。
+
+修复提示词现在有【第五步·修完必须反写修复记录】，内嵌该条的工单 id 与 finding 键，
+给出可直接执行的命令：
+
+```powershell
+node cap.mjs fixes report --ticket=<工单 id> --finding="<finding 键>" --file=a.js --summary="改了什么"
+```
+
+三条边界（写死在 `lib/fixes.js`，不只在文档里）：
+
+1. **反写是声明，不是判定** —— 它只记录「你改了什么」，**绝不改修复状态**。
+   状态仍由复发测量给出。「我改了」与「它好了」是两件事，混起来就是把声明冒充测量。
+   所以页面上反写证据与状态**分成两组字段**显示，结论文案里也是分开陈述的。
+2. **白名单字段** —— 台账会被后续会话读到，任由上报塞任意字段等于开一个注入口。
+   只收 `ticketId/findingRef/files/summary/by/at/verified`。
+3. **路径只存文件名**，不存完整绝对路径（完整路径含个人信息，对外要脱敏）。
+
+没修成功也要写 `--summary="未能修：<为什么>"`——**谎报比不报更糟**。
+报了个不存在的工单 id 时，记录照样写入但会单列 `orphanReports`（与孤儿 close 分开两列报出）。
+
+## 账本记录按修复状态拆分（v0.12.0）
+
+概览那一格原本是**流水条数**（24,952，只增不减），而「已修」是按工单时刻之后有无复发
+**测**出来的——两者不是一个口径，直接把总数当「待修」会算错。现在拆成四格 +
+总数，全部是**记录条数**口径：
+
+```
+已修 401 条 · 待修 8,504 条 · 不修（P3）15,531 条 · 未归类 519 条 ＝ 账本 24,955 条
+```
+
+「未归类」＝未达诊断阈值（`minCount=3`）的零散记录，**单列不藏**——四格加总必须回到总数。
+
+⚠ **两组数不是一回事**：上表是**记录条数**，而「修复台账」卡片里的 `counts` 是
+**故障类型数**（197 类待修 / 29 类不修）。渲染与页面都显式点明这一点，否则会把
+2.4 万条流水读成 197 条。
 
 ## 错误账本（v0.8.0）
 
@@ -422,9 +466,16 @@ Web/RPC 面（`/efficiency/query|list|scan|guide`）按最小赌注接入宿主
 
 ```powershell
 npm test   # node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs
-           # —— 199 项（44 + 55 + 100），全绿
+           #           test/client.test.mjs test/fixes.test.mjs
+           # —— 284 项，全绿
 # 注意：本机 node --test test/ 目录形态会报 MODULE_NOT_FOUND，须指文件。
 ```
+
+**变异测试（防同义反复）**：新增功能的关键断言逐条做过「改坏源码 → 测试必须变红」验证，
+5/5 全部被抓（反写顺手改状态 / 反序「先落台账后拼提示词」/ 静默吞孤儿反写 / 编造 total /
+绕过字段白名单）。其中一条还抓出一个 `node --check` **完全通过**、但 CLI 整挂的 TDZ bug
+（`REPEATABLE_FLAGS` 定义在 `switch` 之后）——所以新增了「CLI 必须真的能跑」的执行级测试，
+静态语法检查不算数。
 
 覆盖：探针映射先验（≥1 命中才信整批）、落盘幂等、验收 A（匹配+调用方式）、
 验收 B（移除检测+针对性引导）、空清单/空查询/无命中、多候选澄清、类型猜测、schema 校验、

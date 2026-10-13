@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -29,9 +30,9 @@ const mod = (p) => pathToFileURL(path.join(root, 'lib', p)).href;
 
 const {
   FIXES_SCHEMA, FIXES_FILE, DEFAULT_MIN_WINDOW_MS, STALE_AFTER_MS,
-  FIX_RECORD_TYPES, FIX_STATES,
-  fixesDir, fixesPath, promptHash, findingKey,
-  makeTicket, openTicket, appendFix, readFixes, closeTicket, adoptTicket,
+  FIX_RECORD_TYPES, FIX_STATES, FIX_REPORT_FIELDS,
+  fixesDir, fixesPath, promptHash, findingKey, newTicketId,
+  makeTicket, openTicket, appendFix, readFixes, closeTicket, adoptTicket, reportFix,
   verifyTicket, verifyAll, buildOpenList, summarizeOpenList, renderFixes,
 } = await import(mod('fixes.js'));
 const { diagnose } = await import(mod('diagnose.js'));
@@ -496,14 +497,254 @@ test('接线：源码层锁死「开工单」与「提示词」共用 pickFixabl
   assert.match(idx, /openTicket/, 'RPC 侧必须走 openTicket（保证同 key 只有一张在用工单）');
 });
 
+test('接线：CLI 必须**真的能跑** —— 语法检查过不代表能跑', () => {
+  // 这是踩过的真坑：`REPEATABLE_FLAGS` 定义在 `switch (cmd)` 之后 ⇒ TDZ ⇒
+  // 报 `Cannot access 'REPEATABLE_FLAGS' before initialization`。
+  // ⚠ **`node --check cap.mjs` 完全通过**（语法没错），但整个 CLI 全挂。
+  //   所以必须有「实际执行」的测试，静态检查不算数。
+  const dir = tmp();
+  const env = { ...process.env };
+  const r = spawnSync(process.execPath, [path.join(root, 'cap.mjs'), 'fixes', `--ledger=${dir}`, '--json'], {
+    encoding: 'utf8', env, cwd: root,
+  });
+  assert.equal(r.status, 0, `cap.mjs 执行失败：\n${r.stdout}\n${r.stderr}`);
+  const out = `${r.stdout}${r.stderr}`;
+  assert.equal(/before initialization/.test(out), false, '不得有 TDZ 报错');
+  assert.match(out, /dsh-efficiency\/fixes\/v1/, '必须真的回出台封信封');
+  assert.match(out, /recordTotals/, '空台账也要能给记录级对账字段');
+});
+
 test('接线：开单失败不得影响提示词交付（提示词是主产物）', () => {
   const idx = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8');
-  // 开单必须在 try 里，且 catch 只记 ticketError、不改变响应里的 prompt
   const seg = idx.slice(idx.indexOf('${BASE}/fixprompt'));
   const body = seg.slice(0, seg.indexOf('${BASE}/fixes`]'));
+
+  // ① 开单路径必须在 try 里，失败只记 ticketError —— 不许把异常抛给客户端
   assert.match(body, /try \{/);
   assert.match(body, /catch \(e\) \{/);
-  assert.match(body, /prompt,\s*\n\s*tickets/, '响应里 prompt 与 tickets 并列，开单失败只让 tickets 为空');
+  assert.match(body, /ticketError = String\(e\?\.message/, '失败必须落进 ticketError，而不是中断响应');
+
+  // ② 降级路径必须真的**产出提示词**（不是直接报错/返回空）
+  //    v0.12.0 起 `prompt` 变量在分支里赋值，末尾的降级 jsonOut 才拼提示词。
+  const tail = body.slice(body.lastIndexOf('catch (e) {'));
+  assert.match(tail, /buildFixPrompt\(d, promptOpts\)/, '降级时必须仍生成提示词');
+
+  // ③ 两条路径都要回 tickets/superseded/ticketError —— 调用方才能分辨「有没有开单」
+  const rets = body.match(/jsonOut\(res, 200, \{/g) ?? [];
+  assert.ok(rets.length >= 2, '应有「已开单」与「降级」两条返回路径');
+  for (const key of ['tickets', 'superseded']) {
+    assert.ok(new RegExp(`${key}\\b`).test(body), `响应必须含 ${key}`);
+  }
+});
+
+test('接线：工单 id 必须先于提示词正文生成（否则执行者无法引用它反写）', () => {
+  // 顺序错了（先落台账、后拼提示词）就只能二次改写台账，而台账是 append-only。
+  const idx = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8');
+  const seg = idx.slice(idx.indexOf('${BASE}/fixprompt'));
+  const body = seg.slice(0, seg.indexOf('${BASE}/fixes`]'));
+  const iIds = body.indexOf('newTicketId()');
+  const iPrompt = body.indexOf('buildFixPrompt(d, { ...promptOpts, tickets: map })');
+  const iOpen = body.indexOf('openTicket(');
+  assert.ok(iIds > -1, '必须预生成 id');
+  assert.ok(iPrompt > -1, '必须把 id 映射传进提示词');
+  assert.ok(iOpen > -1, '必须落台账');
+  assert.ok(iIds < iPrompt, 'id 生成必须早于提示词正文');
+  assert.ok(iPrompt < iOpen, '提示词正文必须早于落台账（正文里已引用 id）');
+
+  // CLI 侧同一条不变量
+  const cap = fs.readFileSync(path.join(root, 'cap.mjs'), 'utf8');
+  const cbody = cap.slice(cap.indexOf('async function fixpromptCmd'));
+  const cIds = cbody.indexOf('newTicketId()');
+  const cPrompt = cbody.indexOf('buildFixPrompt(d, { ...opts, tickets: map })');
+  const cOpen = cbody.indexOf('openTicket(');
+  assert.ok(cIds > -1 && cPrompt > -1 && cOpen > -1, 'CLI 三步齐备');
+  assert.ok(cIds < cPrompt && cPrompt < cOpen, 'CLI 侧顺序必须一致：id → 正文 → 落单');
+});
+
+// ── 10. 反写（老板 m01876：「修复提示词里面要加入把修复记录反写到效率机插件的记录里面」）──
+test('反写：记录挂到工单上，且**不改变**修复状态（声明 ≠ 判定）', async () => {
+  const dir = tmp();
+  const f = mkFinding({ code: 'R1', tool: 'edit' });
+  const tk = makeTicket({ finding: f, now: NOW });
+  await appendFix(tk, dir);
+
+  // 工单之后**仍有**该故障复发 ⇒ 测量结果必须还是 recurring
+  const records = [
+    mkRec({ time: NOW - 100, code: 'R1', tool: 'edit' }),
+    mkRec({ time: NOW + 100, code: 'R1', tool: 'edit' }),
+  ];
+  const before = verifyTicket(tk, records, { minWindowMs: MIN, now: NOW + 10 * MIN });
+  assert.equal(before.state, 'recurring');
+
+  await reportFix({ ticketId: tk.id, findingRef: 'R1|tool:edit', files: ['a.js'], summary: '改了锚点', by: 'cli' }, dir);
+
+  const j = await readFixes(dir);
+  const after = verifyTicket(j.tickets[0], records, { minWindowMs: MIN, now: NOW + 10 * MIN });
+  assert.equal(after.state, 'recurring', '反写不得把「仍复发」洗成「已修」');
+  assert.equal(after.reportCount, 1, '反写必须被折叠进工单');
+  assert.deepEqual(after.reportedFiles, ['a.js']);
+  assert.equal(after.authoritative, true, '状态仍是测量值');
+});
+
+test('反写：结论文案必须同时交代「改了什么」与「有没有复发」，且分开陈述', () => {
+  const tk = { ...makeTicket({ finding: mkFinding({ code: 'R2', tool: 'edit' }), now: NOW }), reports: [{ at: NOW + 1, files: ['x.js'] }] };
+  const v = verifyTicket(tk, [], { minWindowMs: MIN, now: NOW + 10 * MIN });
+  assert.equal(v.state, 'resolved');
+  assert.match(v.note, /未再复发/, '仍须说「未再复发」');
+  assert.match(v.note, /不等于根因已消除/, '诚实边界不得因有反写而消失');
+  assert.match(v.note, /已上报改动 1 次/, '必须交代改动已上报');
+  assert.match(v.note, /声明，非判定|声明/, '上报必须是**声明**措辞');
+
+  // 无上报时必须明说不知道改了什么 —— 不许静默略过
+  const v2 = verifyTicket(makeTicket({ finding: mkFinding({ code: 'R3' }), now: NOW }), [], { minWindowMs: MIN, now: NOW + 10 * MIN });
+  assert.match(v2.note, /无改动上报/, '没上报就要说「不知道他改了什么」');
+});
+
+test('反写：路径只存文件名（完整路径含个人信息，对外要脱敏）', async () => {
+  const dir = tmp();
+  const tk = makeTicket({ finding: mkFinding({ code: 'R4' }), now: NOW });
+  await appendFix(tk, dir);
+  const rec = await reportFix({
+    ticketId: tk.id,
+    files: ['D:\\Agent\\CodeLib\\secret-proj\\a.js', '/home/someone/private/b.py'],
+    now: NOW + 1,
+  }, dir);
+  assert.deepEqual(rec.files, ['a.js', 'b.py'], '只保留文件名');
+  assert.equal(JSON.stringify(rec).includes('secret-proj'), false, '台账里不得出现目录路径');
+  assert.equal(JSON.stringify(rec).includes('/home/'), false);
+});
+
+test('反写：白名单字段 —— 任意附加字段不得进入台账', async () => {
+  const dir = tmp();
+  const tk = makeTicket({ finding: mkFinding({ code: 'R5' }), now: NOW });
+  await appendFix(tk, dir);
+  const rec = await reportFix({
+    ticketId: tk.id, summary: 'ok', now: NOW + 1,
+    // 恶意/误传的附加字段
+    ...{ evil: 'x'.repeat(10), html: '<img onerror=1>', note: 'ignored' },
+  }, dir);
+  const raw = fs.readFileSync(fixesPath(dir), 'utf8').split('\n').filter(Boolean).pop();
+  const parsed = JSON.parse(raw);
+  assert.equal(parsed.evil, undefined, '未列入白名单的字段不得落盘');
+  assert.equal(parsed.html, undefined);
+  assert.equal(rec.basis, 'reported-by-executor');
+});
+
+test('反写：同一工单可多次上报（改一轮报一次），按时间升序', async () => {
+  const dir = tmp();
+  const tk = makeTicket({ finding: mkFinding({ code: 'R6' }), now: NOW });
+  await appendFix(tk, dir);
+  await reportFix({ ticketId: tk.id, files: ['a.js'], summary: '第一轮', now: NOW + 10 }, dir);
+  await reportFix({ ticketId: tk.id, files: ['b.js'], summary: '第二轮', now: NOW + 20 }, dir);
+  const j = await readFixes(dir);
+  assert.equal(j.tickets[0].reports.length, 2);
+  assert.equal(j.tickets[0].reports[0].summary, '第一轮', '先改的必须排在前');
+  assert.equal(j.tickets[0].reports[1].summary, '第二轮');
+});
+
+test('反写：工单 id 对不上 ⇒ 单列 orphanReports，绝不静默丢弃', async () => {
+  const dir = tmp();
+  await reportFix({ ticketId: 'fix-nonexistent', files: ['a.js'], summary: '手滑', now: NOW }, dir);
+  const j = await readFixes(dir);
+  assert.equal(j.tickets.length, 0);
+  assert.equal(j.orphanReports.length, 1, '孤儿反写必须被报出');
+  assert.equal(j.orphanReports[0].ticketId, 'fix-nonexistent');
+  // 与孤儿关闭记录分开两列 —— 两者是不同的数据损坏形态
+  assert.equal(j.orphans.length, 0);
+});
+
+test('反写：缺 ticketId 直接抛错，不写脏数据', async () => {
+  const dir = tmp();
+  await assert.rejects(() => reportFix({ files: ['a.js'] }, dir), /ticketId/);
+  const j = await readFixes(dir);
+  assert.equal(j.tickets.length + j.orphanReports.length, 0);
+});
+
+test('反写：提示词必须把「反写」写成必做步骤，且给出工单 id 与 finding 键', () => {
+  const d = {
+    schema: 'x', generatedAt: NOW, minCount: 3, since: 0,
+    fixable: [mkFinding({ code: 'T1', tool: 'edit' })], notFixable: [], bySeverity: {}, counts: {},
+  };
+  const tkId = 'fix-testid-0001';
+  const text = buildFixPrompt(d, { tickets: { 'T1|tool:edit': tkId } });
+
+  assert.ok(text.includes('第五步'), '必须有反写步骤');
+  assert.ok(text.includes(tkId), '正文必须内嵌该条的工单 id');
+  assert.ok(text.includes('T1|tool:edit'), '正文必须给出 finding 键（供 --finding 照抄）');
+  assert.match(text, /fixes report/, '必须给出可执行的反写命令');
+  assert.match(text, /声明，不是判定/, '必须讲清反写是声明不是判定');
+  assert.match(text, /只记失败|只记错误的调用/, '必须讲清为什么要反写（账本不记成功的写）');
+  assert.match(text, /没改成功也要写|谎报比不报更糟/, '失败也必须上报');
+});
+
+test('反写：不开单（--no-ticket）时正文不得出现工单 id 引用', () => {
+  const d = {
+    schema: 'x', generatedAt: NOW, minCount: 3, since: 0,
+    fixable: [mkFinding({ code: 'T2', tool: 'edit' })], notFixable: [], bySeverity: {}, counts: {},
+  };
+  const text = buildFixPrompt(d, {});
+  assert.ok(text.includes('第五步'), '反写步骤仍在（它讲的是纪律，与是否开单无关）');
+  assert.equal(/工单：`fix-/.test(text), false, '没有工单时不得给出假的工单 id');
+});
+
+// ── 11. 记录级对账（老板 m01876：「直接拆成 4 个格」）────────────────
+test('记录级对账：四个数之和必须等于原始记录总数（差值为未归类，不藏）', () => {
+  const d = diagnose([
+    ...[1, 2, 3].map((i) => mkRec({ time: NOW + i, code: 'FIXED', tool: 'glob' })),
+    ...[1, 2, 3].map((i) => mkRec({ time: NOW + i, code: 'PEND', tool: 'edit' })),
+    ...[1, 2, 3].map((i) => mkRec({ time: NOW + i, code: 'RATE_LIMIT' })),
+    mkRec({ time: NOW + 1, code: 'TINY', tool: 'read' }),   // 只有 1 条 ⇒ 未达 minCount=3
+  ], { minCount: 3, since: 0 });
+  const tk = makeTicket({ finding: mkFinding({ code: 'FIXED', tool: 'glob' }), now: NOW + 100 });
+  const records = [
+    ...[1, 2, 3].map((i) => mkRec({ time: NOW + i, code: 'FIXED', tool: 'glob' })),
+    ...[1, 2, 3].map((i) => mkRec({ time: NOW + i, code: 'PEND', tool: 'edit' })),
+    ...[1, 2, 3].map((i) => mkRec({ time: NOW + i, code: 'RATE_LIMIT' })),
+    mkRec({ time: NOW + 1, code: 'TINY', tool: 'read' }),
+  ];
+  const rep = buildOpenList(d, verifyAll([tk], records, { minWindowMs: MIN, now: NOW + 10 * MIN }),
+    { minWindowMs: MIN, now: NOW + 10 * MIN, totalRecords: records.length });
+
+  const rt = rep.recordTotals;
+  assert.equal(rt.total, 10);
+  assert.equal(rt.resolved, 3, '已修的 3 条');
+  assert.equal(rt.pending, 3, '待修的 3 条');
+  assert.equal(rt.notFixable, 3, '不修的 3 条');
+  assert.equal(rt.unclassified, 1, '未达阈值的 1 条必须单列，不许并进任何一类');
+  const sum = rt.resolved + rt.pending + rt.notFixable + rt.declared + rt.superseded + rt.unclassified;
+  assert.equal(sum, rt.total, '四个数（+声明+取代）之和必须回到总数 —— 否则就是在藏数');
+  assert.equal(rt.basis, 'ledger-record-count');
+});
+
+test('记录级对账：不给 totalRecords 时不编造 total（宁缺勿假）', () => {
+  const d = diagnose([...Array(3)].map((_, i) => mkRec({ time: NOW + i, code: 'X', tool: 'edit' })), { minCount: 1, since: 0 });
+  const rep = buildOpenList(d, [], { minWindowMs: MIN, now: NOW });
+  assert.equal(rep.recordTotals.total, undefined, '没有总数就不许编一个');
+  assert.equal(rep.recordTotals.unclassified, undefined);
+  assert.equal(rep.recordTotals.basis, undefined);
+  assert.equal(typeof rep.recordTotals.pending, 'number', '但分项数仍要给');
+});
+
+test('记录级对账：条数口径与类型口径必须分开陈述（混着看会把 2.4 万读成 197）', () => {
+  const d = diagnose([
+    ...[...Array(500)].map((_, i) => mkRec({ time: NOW + i, code: 'BIG', tool: 'edit' })),
+    ...[...Array(3)].map((_, i) => mkRec({ time: NOW + i, code: 'SMALL', tool: 'read' })),
+  ], { minCount: 1, since: 0 });
+  const rep = buildOpenList(d, [], { minWindowMs: MIN, now: NOW, totalRecords: 503 });
+  assert.equal(rep.counts.pending, 2, '类型口径：2 类');
+  assert.equal(rep.recordTotals.pending, 503, '条数口径：503 条');
+  const txt = renderFixes(rep);
+  assert.match(txt, /类型数|不是一回事/, '渲染必须点明两组数不是一回事');
+  assert.match(txt, /记录级对账/);
+});
+
+test('渲染：反写证据与状态分开呈现，且孤儿反写要报出来', () => {
+  const d = diagnose([...Array(3)].map((_, i) => mkRec({ time: NOW + i, code: 'Z', tool: 'edit' })), { minCount: 1, since: 0 });
+  const tk = { ...makeTicket({ finding: mkFinding({ code: 'Z', tool: 'edit' }), now: NOW }), reports: [{ at: NOW + 1, files: ['q.js'], summary: '改好了' }] };
+  const rep = buildOpenList(d, verifyAll([tk], [], { minWindowMs: MIN, now: NOW + 10 * MIN }), { minWindowMs: MIN, now: NOW + 10 * MIN, totalRecords: 3 });
+  const txt = renderFixes(rep);
+  assert.match(txt, /已反写 1 次.*q\.js/s, '反写内容必须上屏');
+  assert.match(txt, /声明.*非判定/, '且必须标明是声明');
 });
 
 test('接线：CLI 与 RPC 用同一套语义（都走 fixes.js，不各写一遍判定）', () => {
@@ -514,6 +755,10 @@ test('接线：CLI 与 RPC 用同一套语义（都走 fixes.js，不各写一�
   for (const s of ['recurring', 'resolved', 'watching']) {
     assert.equal(new RegExp(`['"]${s}['"]`).test(cap), false, `CLI 不得硬编状态 ${s}`);
   }
+  // 反写入口：必须复用同一套 reportFix，且孤儿反写要当场报出
+  assert.match(cap, /sub === 'report'/, 'CLI 必须有 fixes report 子命令');
+  assert.match(cap, /reportFix\(/, '必须复用 lib/fixes.js 的 reportFix');
+  assert.match(cap, /未找到工单/, '孤儿反写必须当场报出，不能只回「已记录」');
 });
 
 test('接线：设置页有独立的修复台账卡片，且不做二次判定', () => {

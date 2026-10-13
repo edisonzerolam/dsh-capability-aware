@@ -148,9 +148,52 @@ node cap.mjs fixprompt [--no-ticket] # generate a fix prompt (default: also open
 node cap.mjs fixes [list]           # fix ledger: pending list + recurrence verification
 node cap.mjs fixes show <id>        # one ticket's verification detail
 node cap.mjs fixes close <id>       # declare it fixed (a declaration, not a measurement)
+node cap.mjs fixes report --ticket=<id> --finding="<key>" --file=x.js --summary="what changed"
+                                    # write the repair back (v0.12.0; do this after every fix)
 node cap.mjs fixes adopt --code=X --kind=tool --name=edit --at="<ISO>"
                                     # back-fill a ticket for something you fixed before this existed
 ```
+
+### Writing repairs back (v0.12.0)
+
+**Why this is mandatory**: the error ledger **only records failing calls** — `tool/result` goes in
+only when `isError` is set (read from `lib/ledger/extract.js:132-150`). A **successful** `edit`/`write`
+leaves **no trace at all**. So "which finding did I fix, and which files did I touch" is *physically
+invisible* to the ledger — only the executor knows it. Without writing it back, the next diagnosis
+shows the same finding and **nobody can answer what was actually changed**.
+
+The fix prompt now carries a step 5 ("write the repair back"), embedding that finding's ticket id and
+finding key plus a ready-to-run command. Three boundaries, enforced in `lib/fixes.js` not just in prose:
+
+1. **A write-back is a declaration, never a verdict** — it records what you changed and **never
+   touches the fix state**. "I changed it" and "it is fixed" are two different things; conflating
+   them is passing off a claim as a measurement. Evidence and state are therefore displayed as two
+   separate field groups, and stated separately in the note text.
+2. **Whitelisted fields only** — the journal is read by later sessions, so accepting arbitrary fields
+   would be opening an injection channel.
+3. **File names only, never absolute paths** (absolute paths carry personal information).
+
+If the fix did *not* work, still report it (`--summary="could not fix: <why>"`); a false report is
+worse than none. Reporting an unknown ticket id still writes the row, but it is listed separately
+under `orphanReports` (kept apart from orphan `close` rows).
+
+### Ledger records split by fix state (v0.12.0)
+
+That overview cell used to be the **raw record count** (24,952, monotonically growing), while
+"fixed" is *measured* from whether the finding recurred after the ticket time — different units, so
+subtracting one from the other is simply wrong. It is now split into four cells plus a total, all in
+**record-count** units:
+
+```
+fixed 401 · pending 8,504 · not ours (P3) 15,531 · unclassified 519  =  ledger 24,955
+```
+
+"Unclassified" is the scattered records below the diagnostic threshold (`minCount=3`) — shown, never
+hidden: the four cells plus the total must add back up.
+
+⚠ **The two sets of numbers are not interchangeable**: the above counts **records**, while the
+`counts` inside the Fix journal card count **distinct failure types** (197 pending / 29 not-ours).
+Both the CLI renderer and the settings page say so explicitly, otherwise 24k of traffic reads as 197.
 
 ### Fix ledger (v0.11.0)
 
@@ -189,7 +232,7 @@ One plugin, one data directory.
 
 ## Verified on a real machine
 
-- **258/258 unit tests green** (`npm test` → `node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs test/client.test.mjs test/fixes.test.mjs`)
+- **284/284 unit tests green** (`npm test` → `node --test test/capability.test.mjs test/ledger.test.mjs test/efficiency.test.mjs test/client.test.mjs test/fixes.test.mjs`)
 - Real inventory: **763 entries** — skill 351 · software 109 · env 81 · memory 16 · plugin 10 · automation 9 · hardware 7 · tool 5 · mcp 1
   (plus **174** interface entries)
 - Live host evidence: boot scan, **reactive watcher**, **20-min periodic** scans, real `session/event` error capture,
@@ -198,7 +241,16 @@ One plugin, one data directory.
   `settings.section` slot — live process table, inventory overview, graded diagnostics, fix-prompt generation
 - A **fix ledger** (v0.11.0) that converges the pending list: tickets opened at prompt-generation time, recurrence
   verified by re-running the *same* `diagnose()`, and P3 excluded so "cannot be fixed here" never masquerades as
-  "to be fixed" (real run: 191 pending + 28 not-ours-to-fix, where the top of the list used to be provider noise)
+  "to be fixed" (real run: 197 pending + 29 not-ours-to-fix, where the top of the list used to be provider noise)
+- **Write-back and record-level accounting** (v0.12.0), both driven by one measured fact: the ledger records only
+  *failing* calls, so a successful `edit`/`write` leaves no trace and "what did I change" is knowable only to the
+  executor ⇒ the fix prompt now requires a write-back (declaration, never a verdict; whitelisted fields;
+  file names only). The overview cell is split into four record-count cells whose sum must return the ledger
+  total — verified on real data: `401 + 8,504 + 15,531 + 519 = 24,955`
+- **Test honesty check via mutation** — five deliberate source mutations (write-back silently marking a ticket
+  fixed, reversing id-before-prompt order, swallowing orphan reports, inventing a total, bypassing the field
+  whitelist) were each confirmed to **turn the new tests red**: 5/5 caught, so the assertions are not tautologies.
+  One of them also caught a real TDZ bug that `node --check` passes happily while the whole CLI is dead
 - **Nine real-machine defects found and fixed** — three by live RPC probes before release
   (Cordis service access throwing, the light scan wiping interface entries, self-cost mis-attributing host CPU),
   three from the settings page (a 500px flex gap, an unlabelled CPU basis, ledger totals read from the wrong route),

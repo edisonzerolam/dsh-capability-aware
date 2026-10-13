@@ -139,7 +139,7 @@ const FIXTURES = {
     healthy: true, state: 'ok', entries: 762,
     counts: { skill: 351, plugin: 10, interface: 174 }
   },
-  '/api/efficiency/ledger/recent?limit=1': { total: 15768, badLines: 0, records: [] },
+  '/api/efficiency/ledger/recent?limit=1': { total: 24952, badLines: 0, records: [] },
   '/api/efficiency/monitor/health': { healthy: true, stats: { ticks: 955, errors: 0, samplesWritten: 955 } },
   '/api/efficiency/monitor/procs': {
     source: 'ffi', cores: 12, wallMs: 504, totalWorkingSetMB: 5801,
@@ -190,10 +190,15 @@ const FIXTURES = {
         recurred: 0, note: 'WATCHNOTE_SENTINEL', ticket: null
       }
     ],
-    resolved: [], watching: [], declared: [], superseded: [], staleUnticketed: []
+    resolved: [], watching: [], declared: [], superseded: [], staleUnticketed: [],
+    // 记录级对账（老板 m01876 选了「概览那一格直接拆成 4 个格」）。
+    // 四格是**记录条数**口径，与 counts 的类型数不是一回事，页面必须两者都在。
+    recordTotals: {
+      total: 24952, pending: 8501, resolved: 401, notFixable: 15531,
+      declared: 0, superseded: 0, unclassified: 519, basis: 'ledger-record-count'
+    }
   }
 }
-
 test('客户端页面：取数走 6 条只读路由，并把后端原样的数渲染出来', async () => {
   const def = await loadBundle()
   const mod = def.factory(() => ReactShim)
@@ -232,7 +237,7 @@ test('客户端页面：取数走 6 条只读路由，并把后端原样的数�
     // 概览：能力条目 / 技能 / 插件 / 接口
     assert.match(text, /762/, '能力条目数必须上屏')
     assert.match(text, /351/, '技能数必须上屏')
-    assert.match(text, /15,768/, '账本记录数必须按千分位上屏')
+    assert.match(text, /24,952/, '账本记录数必须按千分位上屏')
     assert.match(text, /955/, '监控心跳必须上屏')
     // 进程表：pid / 角色 / 映像名 / 免责说明
     assert.match(text, /42256/, '进程 pid 必须上屏')
@@ -269,6 +274,23 @@ test('客户端页面：取数走 6 条只读路由，并把后端原样的数�
     // 「不修（非本机问题）」必须与「待修」分开 —— 混在一起就是按类别说谎
     assert.match(text, /不修（非本机问题）/, '「不修」必须单列一格')
     assert.match(text, /27/, '不修条目数必须上屏')
+    // ── 账本记录拆四格（老板 m01876 裁决）──────────────────────
+    assert.match(text, /已修 · 条/, '必须有「已修 · 条」格')
+    assert.match(text, /待修 · 条/, '必须有「待修 · 条」格')
+    assert.match(text, /不修 · 条/, '必须有「不修 · 条」格')
+    assert.match(text, /未归类 · 条/, '必须有「未归类 · 条」格')
+    assert.match(text, /8,501/, '待修**条数**必须上屏（不能拿类型数 197 顶替）')
+    assert.match(text, /15,531/, '不修条数必须上屏')
+    assert.match(text, /519/, '未归类条数必须上屏')
+    // 口径提示必须上屏，否则读者会把「条数」读成「类型数」
+    assert.match(text, /记录条数|故障类型数/, '必须点明两组数口径不同')
+    // 四格之和必须能对上总数 —— fixture 自身也要自洽，否则测试在验证一个假现场
+    const t = FIXTURES['/api/efficiency/fixes'].recordTotals
+    assert.equal(t.pending + t.resolved + t.notFixable + t.declared + t.superseded + t.unclassified,
+      t.total, 'fixture 四格之和必须等于总数（真数据就是这样）')
+    // 与 /ledger 的总数必须一致 —— 两个路由报同一个账本，对不上就是在骗人
+    assert.equal(t.total, FIXTURES['/api/efficiency/ledger/recent?limit=1'].total,
+      'recordTotals.total 必须等于账本 total')
   } finally {
     globalThis.fetch = realFetch
     globalThis.setInterval = realSetInterval

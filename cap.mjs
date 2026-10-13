@@ -22,7 +22,8 @@
 //   node cap.mjs monitor [--watch] [--json] [--selfcheck]   # 资源监控（v0.9.0）
 //   node cap.mjs diagnose [--min=N] [--severity=P0]         # 分级诊断（v0.9.0）
 //   node cap.mjs fixprompt [--out=f.md] [--no-ticket]          # 修复提示词（v0.9.0，v0.11.0 起开修复工单）
-//   node cap.mjs fixes [list|show <id>|close <id>|adopt]        # 修复台账与待修清单收敛（v0.11.0）
+//   node cap.mjs fixes [list|show <id>|close <id>|report|adopt]   # 修复台账与待修清单收敛（v0.11.0）
+//   node cap.mjs fixes report --ticket=<id> [--finding="<键>"] [--file=x.js] [--summary="..."]  # 反写（v0.12.0）
 //   node cap.mjs fixes adopt --code=X --kind=tool --name=edit --at="2026-10-11 20:00"
 //     [--window=<ms>]  观察窗口下限（默认 30 分钟）　[--stale=<ms>] 久未见阈值（默认 6 小时）
 
@@ -45,6 +46,16 @@ function printJson(v) {
 }
 
 const file = process.env.DSH_EFF_FILE || undefined;
+
+/**
+ * 可重复出现的 flag —— 重复时收成数组（其余 flag 保持「最后一个赢」）。
+ *
+ * ⚠ 必须定义在**模块顶部**（`switch` 之前）：它被 `ledgerFlags()` 引用，而
+ * `ledgerFlags` 在文件顶部那个 `switch (cmd)` 里就被调用了。放在 `switch` 之后
+ * 会踩 TDZ —— 报 `Cannot access 'REPEATABLE_FLAGS' before initialization`，
+ * 且因为 `case` 在顶层执行，**整个 CLI 全挂**（真机实测踩到过一次）。
+ */
+const REPEATABLE_FLAGS = new Set(['file', 'files']);
 
 // query/stale 前统一构造 idf：**每次现算**。
 // ⚠ 不用落盘的 meta.idf——它是 scan 时刻的快照，alias 灌入/条目修改后会过期，
@@ -255,6 +266,12 @@ function ledgerFlags(rest) {
     if (!m) { flags.positional.push(a); continue; }
     const k = m[1];
     const v = m[2] === undefined ? true : m[2];
+    if (REPEATABLE_FLAGS.has(k) && k in flags) {
+      // 反写可能一次改多个文件：`--file=a.js --file=b.js` 必须都要，
+      // 否则静默只留最后一个 —— 上报里少记文件比不报更误导。
+      flags[k] = [].concat(flags[k], v);
+      continue;
+    }
     flags[k] = v;
   }
   return flags;
@@ -630,28 +647,37 @@ async function fixpromptCmd(rest) {
     maxItems: Number(flags.top) || 8,
     includeP3: flags.p3 !== 'false',
   };
-  const text = buildFixPrompt(d, opts);
 
-  // ── 开修复工单（v0.11.0） ──────────────────────────────────────
-  // 工单记「这份提示词列了哪几条 + 生成时刻」；生成时刻是之后判断
-  // 「修后有没有再复发」的分界线，没有它待修清单无法收敛。
+  // ── 顺序很关键：**先定 id → 再拼提示词 → 最后落台账**（v0.12.0）────
+  // 执行者要在提示词正文里引用工单 id 去反写（老板 m01876 要求），所以 id 必须
+  // 在正文生成之前就定下来。反过来就只能二次改写台账，而台账是 append-only。
   // `--no-ticket` 只出提示词、不落台账（用于「只想看看」的场景）。
   const tickets = [];
   let ticketError;
+  let text;
   if (flags.ticket !== 'false') {
     try {
-      const { openTicket } = await import('./lib/fixes.js');
-      for (const f of pickFixables(d, opts)) {
-        const { ticket: tk, superseded } = await openTicket({
-          finding: f, prompt: text, by: 'cli', windowSince: since, minCount: d.minCount,
-        }, flags.ledger);
-        for (const old of superseded) console.error(`  ↳ 取代旧工单 ${old}（同一故障）`);
-        tickets.push(tk);
+      const { newTicketId, openTicket } = await import('./lib/fixes.js');
+      const { findingKeyOf } = await import('./lib/fixprompt.js');
+      const map = {};
+      const ids = pickFixables(d, opts).map((f) => {
+        const id = newTicketId();
+        map[findingKeyOf(f)] = id;
+        return { finding: f, id };
+      });
+      text = buildFixPrompt(d, { ...opts, tickets: map });
+      for (const { finding, id } of ids) {
+        const r = await openTicket({ finding, prompt: text, by: 'cli', id, windowSince: since, minCount: d.minCount }, flags.ledger);
+        for (const old of r.superseded) console.error(`  ↳ 取代旧工单 ${old}（同一故障）`);
+        tickets.push(r.ticket);
       }
     } catch (e) {
       ticketError = String(e?.message ?? e);
-      console.error(`⚠ 修复工单写入失败（提示词仍已生成）：${ticketError}`);
+      console.error(`⚠ 修复工单写入失败（已降级为不开单的提示词）：${ticketError}`);
+      text = buildFixPrompt(d, opts);
     }
+  } else {
+    text = buildFixPrompt(d, opts);
   }
 
   if (typeof flags.out === 'string') {
@@ -718,6 +744,42 @@ async function fixesCmd(rest) {
     return;
   }
 
+  if (sub === 'report') {
+    // 反写：执行者报告「我改了什么」（老板 m01876 要求）。
+    // 账本只记错误、不记成功的 edit/write ⇒ 这条信息只有执行者知道，必须他上报。
+    const ticketId = flags.ticket ?? flags.id ?? flags.ticketId;
+    if (!ticketId) {
+      console.error('用法：node cap.mjs fixes report --ticket=<工单 id> [--finding="<finding 键>"] [--file=<文件名>]... [--summary="<改了什么>"]');
+      console.error('说明：修完必须反写，否则这次修复在效率机里等于没发生过（账本不记成功的 edit/write）。');
+      console.error('  工单 id 见 `node cap.mjs fixprompt` 第三步每条 bullet 末尾。');
+      process.exitCode = 2; return;
+    }
+    // --file 可多次出现（ledgerFlags 对 file 收成数组）⇒ 两种形态都接
+    const files = [];
+    if (typeof flags.file === 'string') files.push(...flags.file.split(','));
+    else if (Array.isArray(flags.file)) for (const f of flags.file) files.push(...String(f).split(','));
+    const rec = await F.reportFix({
+      ticketId: String(ticketId),
+      findingRef: typeof flags.finding === 'string' ? flags.finding : undefined,
+      files,
+      summary: typeof flags.summary === 'string' ? flags.summary : undefined,
+      verified: flags.verified === true || flags.verified === 'true',
+      by: 'cli',
+    }, flags.ledger);
+    // ⚠ 与 close 同理：报了个不存在的工单 id，记录会成孤儿，必须当场说清。
+    const j = await F.readFixes(flags.ledger);
+    const matched = j.tickets.some((t) => t.id === String(ticketId));
+    if (!matched) {
+      console.error(`⚠ 未找到工单 ${ticketId} —— 上报已写入，但**没有对应工单**，会单列为孤儿。请核对工单 id。`);
+      process.exitCode = 1; return;
+    }
+    console.log(`已反写修复记录　工单 ${rec.ticketId}　${new Date(rec.at).toISOString()}`);
+    if (rec.files?.length) console.log(`  改动文件：${rec.files.join('、')}`);
+    if (rec.summary) console.log(`  说明：${rec.summary}`);
+    console.log('　⚠ 这是**声明，不是判定**：修复状态仍按「改后有没有再复发」测量。用 `node cap.mjs fixes` 自查。');
+    return;
+  }
+
   // list / show
   const { diagnose } = await import('./lib/diagnose.js');
   const { records } = await loadDiagnoseInputs(flags);
@@ -728,21 +790,21 @@ async function fixesCmd(rest) {
     const tk = j.tickets.find((t) => t.id === arg);
     if (!tk) { console.error(`未找到工单 ${arg}`); process.exitCode = 1; return; }
     const v = F.verifyTicket(tk, records, {});
-    printJson({ ticket: tk, verification: v, orphans: j.orphans.filter((o) => o.id === tk.id) });
+    printJson({ ticket: tk, verification: v, orphans: j.orphans.filter((o) => o.id === tk.id), orphanReports: j.orphanReports.filter((o) => o.ticketId === tk.id) });
     return;
   }
 
-  const vs = F.verifyAll(j.tickets, records, {
+  const opts = {
     minWindowMs: Number(flags.window) || undefined,
     staleAfterMs: Number(flags.stale) || undefined,
-  });
-  const rep = F.buildOpenList(d, vs, {
-    minWindowMs: Number(flags.window) || undefined,
-    staleAfterMs: Number(flags.stale) || undefined,
-  });
-  if (flags.json === true || flags.json === 'true') { printJson({ ...rep, badLines: j.badLines }); return; }
+    totalRecords: records.length,
+  };
+  const vs = F.verifyAll(j.tickets, records, opts);
+  const rep = F.buildOpenList(d, vs, opts);
+  if (flags.json === true || flags.json === 'true') { printJson({ ...rep, badLines: j.badLines, orphanReports: j.orphanReports.length }); return; }
   console.log(F.renderFixes(rep));
   if (j.badLines) console.log(`\n⚠ 台账有 ${j.badLines} 行无法解析（已跳过）`);
   if (j.orphans.length) console.log(`⚠ 有 ${j.orphans.length} 条孤儿关闭记录（找不到对应工单）`);
+  if (j.orphanReports.length) console.log(`⚠ 有 ${j.orphanReports.length} 条孤儿**反写**记录（工单 id 对不上，改动信息未挂上）`);
 }
 
